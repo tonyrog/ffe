@@ -7,6 +7,7 @@
 -define(BYE,       bye).    %% fixme
 -define(STACK_OVERFLOW,  -3).
 -define(STACK_UNDERFLOW, -4).    %% case clause?
+-define(UNDEF,           -13).   %% undefined word
 -define(QUIT,            -56).
 -define(INTRRUPT,        -28).   %% user interrupt
 
@@ -20,7 +21,8 @@
 	  in = 0,
 	  out = 0,
 	  state = 0,
-	  current = dictionary(),
+	  forth = forth_words(),  %% forth words
+	  current = #{},    %% user defined words
 	  base = 10,
 	  dpl = 0,
 	  csp = [],
@@ -49,6 +51,57 @@
 run() ->
     init(),
     main([]).
+
+compile(File) ->
+    init(),
+    {ok,Fd} = file:open(File, []),
+    set_user(#user.altin, Fd),
+    try main([]) of 
+	[] -> 
+	    save(File);
+	Stack ->
+	    io:format("warning: stack element after compilation: ~p\n",
+		      [Stack]),
+	    save(File)
+    catch
+	throw:{Code,Reason} ->
+	    io:format("error: ~w reason: ~p\n", [Code, Reason]);
+	error:Error ->
+	    io:format("error: internal error ~p\n", [Error])
+    after
+	file:close(Fd)
+    end.
+
+%% go through dictionary and write them as word defintions.
+save(File) ->
+    Fd = altout(),
+    Module = filename:basename(File, ".fs"),
+    io:format(Fd, "-module(~s).\n", [Module]),
+    io:format(Fd, "-compile(export_all).\n", []),
+    maps:fold(
+      fun(Name, Xt, _Acc) ->
+	      W = Xt(),
+	      io:format("'_ffe_~s'() ->\n  {~w, ~p", 
+			[Name,element(1,W),element(2,W)]),
+	      print_words(Fd, 3, W),
+	      io:format(Fd, "}.\n", [])
+      end, [], current()).
+
+print_words(Fd, I, Word) when I =< tuple_size(Word) ->
+    io:format(Fd, ",\n  ", []),
+    print_word(element(I,Word)),
+    print_words(Fd, I+1,Word);
+print_words(_Fd, _I, _Word) ->
+    ok.
+
+
+print_word(W) when is_function(W) ->
+    Props = erlang:fun_info(W),
+    io:format("fun ~s:~s/~w", [proplists:get_value(module,Props),
+			       proplists:get_value(name,Props),
+			       proplists:get_value(arity,Props)]);
+print_word(W) ->
+    io:format("~p", [W]).
 
 %% setup test environment
 init() ->
@@ -111,6 +164,8 @@ here(Data) when is_tuple(Data) -> set_user(#user.dp, Data).
 
 here_() ->  %% get number of compiled words so far
     tuple_size(here()).
+
+forth() -> get_user(#user.forth).
     
 current() -> get_user(#user.current).
 current(Dict) -> set_user(#user.current, Dict).
@@ -125,15 +180,13 @@ create(Name,W) ->
 main(SP) ->
     Compile = state() band ?COMPILE =/= 0,
     case word($\s) of
-	eof -> SP;
+	eof -> 
+	    SP;
 	Name ->
 	    io:format("main: ~s, compile = ~w\n", [Name,Compile]),
 	    case find_word_(Name) of
-		{immediate,Xt} -> exec(Xt(), SP);
-		{true,Xt} when Compile -> comma_(Xt), main(SP);
-		{true,Xt} -> exec(Xt(), SP);
-		{remote,Xt} when Compile -> comma_(Xt), main(SP);
-		{remote,Xt}  -> exec(Xt(), SP);
+		{false,Xt} when Compile -> comma_(Xt), main(SP);
+		{_, Xt} -> exec(Xt(), SP);
 		false -> main_number(Compile,Name,SP)
 	    end
     end.
@@ -142,7 +195,7 @@ main(SP) ->
 main_number(Compile,Name,SP) ->
     try binary_to_integer(Name, base()) of
 	Int when Compile ->
-	    comma_(fun lit/0),
+	    comma_(fun ffe:lit/0),
 	    comma_(Int),
 	    main(SP);
 	Int ->
@@ -151,14 +204,14 @@ main_number(Compile,Name,SP) ->
 	error:_ ->
 	    try binary_to_float(Name) of
 		Flt when Compile ->
-		    comma_(fun lit/0),
+		    comma_(fun ffe:lit/0),
 		    comma_(Flt),
 		    main(SP);
 		Flt ->
 		    main([Flt|SP])
 	    catch
 		error:_ ->
-		    exit({-13,Name})
+		    throw({?UNDEF,Name})
 	    end
     end.
 
@@ -183,18 +236,23 @@ exec(W, SP) ->
 %% compile only 
 code_tick_(Name) ->
     case tick_(Name) of
-	{true,Xt} -> element(3, Xt());
-	{immediate,Xt} -> element(3, Xt());
-	{remote,Xt} -> element(3, Xt());
-	false -> throw({-13, undefined_word})
+	{_,Xt} -> element(3, Xt());
+	false -> throw({?UNDEF, Name})
     end.
 
 %% lookup a word
 tick_(Name) ->
     find_word_(Name).
 
+%%
+%% Find a word:
+%% return: 
+%%      {true, Xt}   -- immediate word
+%%      {false,Xt}   -- regualar word
+%%      false        -- not recoginsed as a word
+%%
 find_word_(Name) ->
-    case maps:find(Name, current()) of
+    case lookup_word_(Name) of
 	error ->
 	    case binary:split(Name,<<":">>) of
 		[Mod,Func] ->
@@ -203,17 +261,24 @@ find_word_(Name) ->
 				       latin1),
 		    %% should we check remote calls for immediate ?
 		    %% what if module does not exist yet? tricky!
-		    {remote, fun () -> apply(M, F, []) end};
-		true ->
+		    {false, fun () -> apply(M, F, []) end};
+		_ ->
 		    false
 	    end;
 	{ok,Xt} ->
 	    W = Xt(),
 	    if element(1,W) band ?IMMEDIATE  =:= ?IMMEDIATE ->
-		    {immediate,Xt};
+		    {true,Xt};
 	       true ->
-		    {true,Xt}
+		    {false,Xt}
 	    end
+    end.
+
+lookup_word_(Name) ->
+    case maps:find(Name, current()) of
+	error ->
+	    maps:find(Name, forth());
+	Found -> Found
     end.
 
 %% TIB  = line buffer
@@ -221,7 +286,7 @@ find_word_(Name) ->
 word(Ch) ->
     In = in(),  %% >in @
     case tib() of
-	<<_:In/binary>> ->
+	Tib when In >= byte_size(Tib) ->
 	    case refill() of
 		eof -> eof;
 		_Count -> word(Ch)
@@ -229,11 +294,11 @@ word(Ch) ->
 	<<_:In/binary,Data/binary>> ->
 	    case enclose(Ch,Data) of
 		[_N1,N2,0] ->
-		    in(In+N2),
+		    in(In+N2+1),
 		    word(Ch);
 		[N1,N2,Len] ->
 		    <<_:N1/binary,Word:Len/binary,_/binary>> = Data,
-		    in(In+N2),
+		    in(In+N2+1),
 		    Word
 	    end
     end.
@@ -315,9 +380,10 @@ find_first_arity(M,F) ->
 	[{_,A}|_] -> A
     end.
     
--define(PRIM(Name,Call), <<Name>> => fun Call/0).
+-define(PRIM(Name,Call), <<Name>> => fun ffe:Call/0).
 
-dictionary() ->
+%% "primitive" forth words, we may compile some of them soon
+forth_words() ->
     #{
        ?PRIM(":",          colon),
        ?PRIM(";",          semicolon),
@@ -396,7 +462,7 @@ colon(SP, RP, IP, WP) ->
     cf_reset(),
     state(?COMPILE),
     Name = word($\s),
-    here({0,Name,fun docol/4}),
+    here({0,Name,fun ffe:docol/4}),
     next(SP, RP, IP, WP).
 
 smudge() ->
@@ -414,7 +480,7 @@ semicolon(SP,RP,IP,WP) ->
     compile_only(),
     case csp() of
 	[] ->
-	    Def = comma_(fun semis/0),
+	    Def = comma_(fun ffe:semis/0),
 	    Name = element(2, Def),
 	    create(Name, fun() -> Def end),
 	    here({}),  %% clear defintion area
@@ -435,7 +501,7 @@ user() ->
     { 0, <<"user">>, fun user/4 }.
 user([Value|SP],RP,IP,WP) ->
     Name = word($\s),
-    create(Name, fun() -> {0, Name, fun dousr/4, Value } end),
+    create(Name, fun() -> {0, Name, fun ffe:dousr/4, Value } end),
     next(SP,RP,IP,WP).
     
 
@@ -445,7 +511,7 @@ do() ->
 do(SP,RP,IP,WP) ->
     compile_only(),
     cf_push(here_()), cf_push(?CF_DO_SYS),
-    comma_(fun pdo/0),
+    comma_(fun ffe:pdo/0),
     next(SP,RP,IP,WP).
 
 %% immediate word
@@ -454,7 +520,7 @@ qdo() ->
 qdo(SP,RP,IP,WP) ->
     compile_only(),
     cf_push(here_()), cf_push(?CF_QDO_SYS),
-    comma_(fun pqdo/0),
+    comma_(fun ffe:pqdo/0),
     comma_(0),  %% patch this place
     next(SP,RP,IP,WP).
 
@@ -465,11 +531,11 @@ loop(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
 	?CF_DO_SYS ->
-	    comma_(fun ploop/0),
+	    comma_(fun ffe:ploop/0),
 	    Pos = cf_pop(),
 	    back_(Pos+1);
 	?CF_QDO_SYS ->
-	    comma_(fun ploop/0),
+	    comma_(fun ffe:ploop/0),
 	    Pos = cf_pop(),
 	    back_(Pos+2),
 	    forward_patch_(Pos+2);
@@ -555,7 +621,7 @@ store() ->
 store([Addr,Value|SP],RP,IP,Code) ->
     case Addr of
 	{user,_} -> 
-	    put(Addr,Value),
+	    set_user(Addr,Value),
 	    next(SP,RP,IP,Code);
 	{sys,_} ->
 	    ets:insert(forth,{Addr,Value}),
@@ -627,12 +693,12 @@ semis(SP,[IP|RP],_IP,WP) ->
     next(SP,RP,IP,WP).
 
 branch() ->
-    {0, "branch", fun branch/4 }.
+    {0, <<"branch">>, fun branch/4 }.
 branch(SP,RP,{IP,Code},WP) ->
     next(SP,RP,{IP+element(IP,Code),Code},WP).
 
 zbranch() ->
-    {0, "0branch", fun zbranch/4 }.
+    {0, <<"0branch">>, fun zbranch/4 }.
 zbranch([0|SP],RP,{IP,Code},WP) ->
     next(SP,RP,{IP+element(IP,Code)},WP);
 zbranch([_|SP],RP,{IP,Code},WP) ->
@@ -640,10 +706,10 @@ zbranch([_|SP],RP,{IP,Code},WP) ->
 
 %%
 dot() ->
-    {0, ".", fun dot/4 }.
+    {0, <<".">>, fun dot/4 }.
 dot([Value|SP],RP,IP,WP) ->
     if is_integer(Value) ->
-	    erlang:display(integer_to_list(Value, base()));
+	    erlang:display_string(integer_to_list(Value, base()));
        true -> %% hmm recursivly display integers in base()!
 	    erlang:display_string(lists:flatten(io_lib:format("~p",[Value])))
     end,
@@ -652,12 +718,12 @@ dot([Value|SP],RP,IP,WP) ->
 %% words manuplating stack only
 
 rote() ->
-    {0, "rot", fun rote/4}.
+    {0, <<"rot">>, fun rote/4}.
 rote([A,B,C|SP],RP,I,Code) ->    
     next([C,B,A|SP],RP,I,Code).
 
 rev_rote() ->
-    {0, "-rot", fun rev_rote/4}.
+    {0, <<"-rot">>, fun rev_rote/4}.
 rev_rote([A,B,C|SP],RP,IP,Code) ->
     next([B,C,A|SP],RP,IP,Code).
 
