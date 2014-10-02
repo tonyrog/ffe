@@ -1,0 +1,27 @@
+
+
+inline compile forth word.
+
+example 
+
+: 2x ( u -- u+u) + + ;
+
+compiles to:
+
+'_ffe_2x'() ->
+	    {0, <<"2x">>, fun ffe:docol/4, 
+	    fun ffe:plus/0, ffe:plus/0,
+	    fun ffe:semis/0 }.
+
+'_ffe_2x'() ->
+	    {0, <<"2x">>, fun local_2x/4 }.
+
+%% Expand words one level
+local_2x(SP,RP,IP,WP) ->
+    local_2x_1(SP,RP,IP,WP).
+local_2x_1(SP,RP,IP,WP) ->
+    local_2x_2([B+A|SP],RP,IP,WP).   %% next = local_2x_2
+local_2x_2(SP,RP,IP,WP) ->
+    local_2x_3([B+A|SP],RP,IP,WP).   %% next = local_2x_3
+local_2x_3(SP,[IP|RP],_IP,WP) ->
+    ffe:next(SP,RP,IP,WP).           %% next = ffe:next

@@ -4,12 +4,6 @@
 -export([create/2]).
 -compile(export_all).
 
--define(BYE,       bye).    %% fixme
--define(STACK_OVERFLOW,  -3).
--define(STACK_UNDERFLOW, -4).    %% case clause?
--define(UNDEF,           -13).   %% undefined word
--define(QUIT,            -56).
--define(INTRRUPT,        -28).   %% user interrupt
 
 -record(user,
 	{
@@ -31,6 +25,7 @@
 	  latest = <<>>
 	}).
 
+
 %% State flags
 -define(COMPILE,  16#01).
 -define(NONAME,   16#02).
@@ -47,6 +42,9 @@
 -define(CF_CASE_SYS, 6).
 -define(CF_OF_SYS, 7).
 -define(CF_SWITCH_SYS, 8).
+
+-include("ffe.hrl").
+
 
 run() ->
     init(),
@@ -363,14 +361,6 @@ take(Ch, Data, Offs) ->
 	    end;
 	_ ->
 	    Offs
-    end.
-
-is_ffe_func(M,Func) when is_binary(Func) ->
-    F = binary_to_atom(<< <<"_ffe_">>/binary,Func/binary>>,latin1),
-    %% ensure loded?
-    case erlang:function_exported(M,F,4) of
-	true  -> {true,F};
-	false -> {false,binary_to_atom(Func,latin1)}
     end.
 
 find_first_arity(M,F) ->
@@ -719,79 +709,73 @@ dot([Value|SP],RP,IP,WP) ->
 
 rote() ->
     {0, <<"rot">>, fun rote/4}.
-rote([A,B,C|SP],RP,I,Code) ->    
-    next([C,B,A|SP],RP,I,Code).
+rote(SP,RP,IP,WP) ->
+    ?rote(SP,RP,IP,WP,next).
 
 rev_rote() ->
     {0, <<"-rot">>, fun rev_rote/4}.
-rev_rote([A,B,C|SP],RP,IP,Code) ->
-    next([B,C,A|SP],RP,IP,Code).
+rev_rote(SP,RP,IP,WP) ->
+    ?rev_rote(SP,RP,IP,WP,next).
 
 plus() ->
     { 0, <<"+">>, fun plus/4 }.
-plus([A,B|SP],RP,IP,WP) ->
-    next([B+A|SP],RP,IP,WP).
+plus(SP,RP,IP,WP) ->
+    ?plus(SP,RP,IP,WP, next).
 
 one_plus() ->
     { 0, <<"1+">>, fun one_plus/4 }.
-one_plus([A|SP],RP,IP,WP) ->
-    next([A+1|SP],RP,IP,WP).
+one_plus(SP,RP,IP,WP) ->
+    ?one_plus(SP,RP,IP,WP,next).
 
 minus() ->
     { 0, <<"-">>, fun minus/4 }.
-minus([A,B|SP],RP,IP,WP) ->
-    next([B-A|SP],RP,IP,WP).
+minus(SP,RP,IP,WP) ->
+    ?minus(SP,RP,IP,WP,next).
 
 one_minus() ->
     { 0, <<"1-">>, fun one_minus/4 }.
-one_minus([A|SP],RP,IP,WP) ->
-    next([A-1|SP],RP,IP,WP).
+one_minus(SP,RP,IP,WP) ->
+    ?one_minus(SP,RP,IP,WP,next).
 
 star() ->
     { 0, <<"*">>, fun star/4 }.
-star([A,B|SP],RP,IP,WP) ->
-    next([B*A|SP],RP,IP,WP).
+star(SP,RP,IP,WP) ->
+    ?star(SP,RP,IP,WP,next).
 
 slash() ->
-    { 0, <<"/">>, fun slash/4 }.    
-slash([0,_B|_SP],_RP,_IP,_WP) ->
-    exit(badarith);
-slash([A,B|SP],RP,IP,WP) ->
-    next([B div A|SP],RP,IP,WP).
+    { 0, <<"/">>, fun slash/4 }.
+slash(SP,RP,IP,WP) ->
+    ?slash(SP,RP,IP,WP,next).
 
 mod() ->
     { 0, <<"mod">>, fun mod/4 }.
-mod([0,_B|_SP],_RP,_IP,_WP) ->
-    exit(badarith);
-mod([A,B|SP],RP,IP,WP) ->
-    next([B rem A|SP],RP,IP,WP).
+mod(SP,RP,IP,WP) ->
+    ?mod(SP,RP,IP,WP,next).
 
 slash_mod() ->
     { 0, <<"/mod">>, fun slash_mod/4 }.
-slash_mod([0,_B|_SP],_RP,_IP,_WP) ->
-    exit(badarith);
-slash_mod([A,B|SP],RP,IP,WP) ->
-    next([B rem A,B div A|SP],RP,IP,WP).
+slash_mod(SP,RP,IP,WP) ->
+    ?slash_mod(SP,RP,IP,WP,next).
 
 negate() ->
     { 0, <<"negate">>, fun negate/4 }.
-negate([A|SP],RP,IP,WP) ->
-    next([-A|SP],RP,IP,WP).
+negate(SP,RP,IP,WP) ->
+    ?negate(SP,RP,IP,WP,next).
 
 over() ->
     { 0, <<"over">>, fun over/4 }.
-over([A,B|SP],RP,IP,WP) ->
-    next([B,A,B|SP],RP,IP,WP).
+over(SP,RP,IP,WP) ->
+    ?over(SP,RP,IP,WP,next).
 
 drop() ->
     { 0, <<"drop">>, fun drop/4 }.
-drop([_|SP],RP,IP,WP) ->
-    next(SP,RP,IP,WP).
+drop(SP,RP,IP,WP) ->
+    ?drop(SP,RP,IP,WP,next).
 
 swap() ->
     { 0, <<"swap">>, fun swap/4 }.
-swap([A,B|SP],RP,IP,WP) ->
-    next([B,A|SP],RP,IP,WP).
+swap(SP,RP,IP,WP) ->
+    ?swap(SP,RP,IP,WP,next).
 
 dupe() ->
     { 0, <<"dup">>, fun dupe/4 }.
