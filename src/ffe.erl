@@ -15,22 +15,23 @@
 
 -record(user,
 	{
-	  tib = <<>>,  %% text input buffer
-	  width = 0,   %% max width of word (fix me not used)
-	  dp = {},     %% data pointer (fixme)
-	  altin = standard_io,
-	  altout = standard_io,
-	  in = 0,
-	  out = 0,
-	  state = 0,
-	  forth = forth_words(),  %% forth words
-	  current = #{},    %% user defined words
-	  base = 10,
-	  dpl = 0,
-	  csp = [],
-	  span = 0,
-	  hld = 0,
-	  latest = <<>>
+	 tib = <<>>,  %% text input buffer
+	 width = 0,   %% max width of word (fix me not used)
+	 dp = {},     %% data pointer (fixme)
+	 altin = standard_io,
+	 altout = standard_io,
+	 in = 0,
+	 out = 0,
+	 state = 0,
+	 forth = [forth_words(),strap()],
+	 current = #{},    %% user defined words
+	 base = 10,
+	 dpl = 0,
+	 csp = [],
+	 span = 0,
+	 hld = 0,
+	 latest = <<>>,
+	 testu = 0
 	}).
 
 
@@ -62,16 +63,19 @@ start() ->
 run() -> start().
 
 compile(File) ->
+    compile(File,[u]).
+
+compile(File,Opt) ->
     init(),
     {ok,Fd} = file:open(File, []),
     set_user(#user.altin, Fd),
     try main([]) of 
 	[] -> 
-	    save(File);
+	    save(File,Opt);
 	Stack ->
 	    io:format("warning: stack element after compilation: ~p\n",
 		      [Stack]),
-	    save(File)
+	    save(File,Opt)
     catch
 	throw:{Code,Reason} ->
 	    io:format("error: ~w reason: ~p\n", [Code, Reason]);
@@ -83,34 +87,95 @@ compile(File) ->
     end.
 
 %% go through dictionary and write them as word defintions.
-save(File) ->
-    Fd = altout(),
+save(File,Opt) ->
+    %% Fd = altout(),
     Module = filename:basename(File, ".fs"),
-    io:format(Fd, "-module(~s).\n", [Module]),
-    io:format(Fd, "-compile(export_all).\n", []),
+    MODULE = string:to_upper(Module),
+    BootStrap = lists:member(b, Opt),
+    Include = lists:member(i, Opt),
+    case Opt of
+	[i|_] ->  %% write as include file
+	    {ok,Fd} = file:open(Module ++ ".i", [write]),
+	    io:format(Fd, "-ifndef(__~s__).\n", [MODULE]),
+	    io:format(Fd, "-define(__~s__, true).\n", [MODULE]);
+	[e|_] ->  %% write as erlang module
+	    {ok,Fd}  = file:open(Module ++ ".erl", [write]),
+	    io:format(Fd, "%% -*- erlang -*-\n", []),
+	    io:format(Fd, "-module(~s).\n", [Module]),
+	    io:format(Fd, "-compile(export_all).\n", []);
+	[u|_] ->  %% output on stdout
+	    Fd = user
+    end,
+    
+    %% generate word defintions, 
     maps:fold(
       fun(Name, Xt, _Acc) ->
 	      W = Xt(),
-	      io:format("'_ffe_~s'() ->\n  {~w, ~p", 
+	      io:format(Fd, "'_ffe_~s'() ->\n  {~w, ~p", 
 			[Name,element(1,W),element(2,W)]),
-	      print_words(Fd, 3, W),
+	      print_words(Fd, Module, 3, W),
 	      io:format(Fd, "}.\n", [])
-      end, [], current()).
+      end, [], current()),
 
-print_words(Fd, I, Word) when I =< tuple_size(Word) ->
+    %% module dictionary
+    Mod = if BootStrap ->
+		  ffe;
+	     true ->
+		  Module
+	  end,
+    if BootStrap; Include ->
+	    io:format(Fd, "~s_words() ->\n  #{\n", [Module]);
+       true ->
+	    io:format(Fd, "words() ->\n  #{\n", [])
+    end,
+    maps:fold(
+      fun(Name, _Xt, _Acc) ->
+	      %%W = _Xt(),
+	      io:format(Fd, "      <<\"~s\">> => fun ~s:'_ffe_~s'/0,\n",
+			[Name, Mod, Name])
+      end, [], current()),
+    io:format(Fd, "      <<>> => false\n", []),  %% dummy clause
+    io:format(Fd, "  }.\n", []),
+
+    case Opt of
+	[i|_] ->
+	    io:format(Fd, "-endif.\n", []);
+	_ ->
+	    ok
+    end,
+    if not is_atom(Fd) ->
+	    file:close(Fd);
+       true  ->
+	    ok
+    end.
+	
+print_words(Fd, Current, I, Word) when I =< tuple_size(Word) ->
     io:format(Fd, ",\n  ", []),
-    print_word(element(I,Word)),
-    print_words(Fd, I+1,Word);
-print_words(_Fd, _I, _Word) ->
+    print_word(Fd, Current, element(I,Word)),
+    print_words(Fd, Current, I+1,Word);
+print_words(_Fd, _Current, _I, _Word) ->
     ok.
 
-print_word(W) when is_function(W) ->
-    Props = erlang:fun_info(W),
-    io:format("fun '~s':'~s'/~w", [proplists:get_value(module,Props),
-				   proplists:get_value(name,Props),
-				   proplists:get_value(arity,Props)]);
-print_word(W) ->
-    io:format("~p", [W]).
+%% fixme: if function is not in ffe and refer to a current
+%% function we must determine the target module differently
+print_word(Fd, Current, W) when is_function(W) ->
+    {arity,Arity} = erlang:fun_info(W, arity),
+    {name,Name} = erlang:fun_info(W, name),
+    {module,Module} = erlang:fun_info(W, module),
+    if Arity =:= 0 ->
+	    Def = W(),
+	    DoCol = fun ffe:docol/4,
+	    if element(3,Def) =:= DoCol ->
+		    io:format(Fd, "fun '~s':'_ffe_~s'/0", 
+			      [Current, element(2,Def)]);
+	       true ->
+		    io:format(Fd, "fun '~s':'~s'/0", [Module, Name])
+	    end;
+       true -> 
+	    io:format(Fd, "fun '~s':'~s'/~w", [Module, Name, Arity])
+    end;
+print_word(Fd, _Current, W) ->
+    io:format(Fd, "~p", [W]).
 
 %% setup test environment
 init() ->
@@ -183,7 +248,7 @@ current(Dict) -> set_user(#user.current, Dict).
 
 %% Add Name to current vocabulary
 define(Name,W) ->
-    io:format("define ~s = ~p = ~p\n", [Name, W, W()]),
+    %% io:format("define ~s = ~p = ~p\n", [Name, W, W()]),
     current(maps:put(Name,W,current())).
 
 %% FIRST VERSION in Erlang - to validate the idea
@@ -348,11 +413,16 @@ find_word_(Name) ->
     end.
 
 lookup_word_(Name) ->
-    case maps:find(Name, current()) of
+    lookup_word_(Name, [current() | forth()]).
+
+lookup_word_(Name, [Dict|Ds]) ->
+    case maps:find(Name, Dict) of
 	error ->
-	    maps:find(Name, forth());
+	    lookup_word_(Name, Ds);
 	Found -> Found
-    end.
+    end;
+lookup_word_(_Name, []) ->
+    error.
 
 %% TIB  = line buffer
 %% SPAN = offset in line buffer
@@ -381,8 +451,8 @@ refill() ->
     ALTIN = altin(),
     ALTOUT = altout(),
     case is_compiling() of
-	false when ALTOUT =/= undefined ->
-	    io:format(ALTOUT, "ok ", []);
+	false when ALTIN =:= standard_io, ALTOUT =:= standard_io ->
+	    emit_string("ok ");
 	_ ->
 	    ok
     end,
@@ -391,6 +461,7 @@ refill() ->
 	    source(<<>>,0),
 	    eof;
 	Data ->
+	    out(0), %%? ok?
 	    Data1 = erlang:iolist_to_binary(Data),
 	    Sz1 = byte_size(Data1)-1,
 	    %% strip newline
@@ -398,6 +469,34 @@ refill() ->
 		<<Data2:Sz1/binary,$\n>> -> source(Data2,0);
 		Data2 -> source(Data2,0)
 	    end
+    end.
+
+emit_char(Char) ->
+    ALTOUT = altout(),
+    Pos = out(),
+    if Char =:= $\n ->
+	    io:put_chars(ALTOUT,[$\n]),
+	    out(0);
+       Pos >= 79 ->
+	    io:put_chars(ALTOUT,[$\n,Char]),
+	    out(1);
+       true ->
+	    io:put_chars(ALTOUT,[Char]),
+	    out(Pos+1)
+    end.
+
+emit_string(Chars) ->
+    ALTOUT = altout(),
+    N = length(Chars),
+    Pos = out(),
+    if Pos >= 79 ->
+	    io:put_chars(ALTOUT,Chars);
+       Pos + N >= 79 ->
+	    io:put_chars(ALTOUT,[$\n|Chars]),
+	    out(N);
+       true ->
+	    io:put_chars(ALTOUT,Chars),
+	    out(Pos+N)
     end.
 
 %%  ( ch c-addr len -- c-addr n1 n2 n3 )
@@ -473,6 +572,8 @@ forth_words() ->
       ?WORD("(?do)",      pqdo),
       ?WORD("(loop)",     ploop),
       ?WORD("noop",       '_ffe_noop'),
+      ?WORD("base",       '_ffe_base'),
+      ?WORD("testu",      '_ffe_testu'),
       
       ?WORD("@",          '_ffe_fetch'),
       ?WORD("!",          '_ffe_store'),
@@ -530,12 +631,12 @@ forth_words() ->
       ?WORD(";",          semicolon),
       ?WORD("CONSTANT",   compile_constant),
       ?WORD("USER",       compile_user),
-      ?WORD("DO",         compile_do),
+      ?WORD("#DO",        compile_do),
       ?WORD("?DO",        compile_qdo),
-      ?WORD("LOOP",       compile_loop),
-      ?WORD("IF",         compile_if),
-      ?WORD("THEN",       compile_then),
-      ?WORD("ELSE",       compile_else),
+      ?WORD("#LOOP",      compile_loop),
+      ?WORD("#IF",        compile_if),
+      ?WORD("#THEN",      compile_then),
+      ?WORD("#ELSE",      compile_else),
       ?WORD(",",          comma),
       
       ?WORD("\\",         backslash),
@@ -543,10 +644,14 @@ forth_words() ->
       ?WORD("[",          left_bracket),
       ?WORD("]",          right_bracket),
       ?WORD(".",          '_ffe_dot'),
-      ?WORD("LITERAL",    lit),
+      ?WORD("#LIT",       lit),
       ?WORD("\"",         string),
       ?WORD("'",          tick),
-      ?WORD("[']",        bracket_tick)
+      ?WORD("[']",        bracket_tick),
+
+      %% Utils - will be strapped later
+      ?WORD(".s",         emit_stack),
+      ?WORD("words",      emit_words)
      }.
 
 %%
@@ -642,9 +747,9 @@ forward_patch__(Pos) ->
     here(erlang:setelement(Pos+1,Here,Offset-1)).
     
 
-%% DO - ffe compiler, immediate word
+%% #DO - ffe compiler, immediate word
 compile_do() ->
-    {?IMMEDIATE, <<"DO">>, fun compile_do/4 }.
+    {?IMMEDIATE, <<"#DO">>, fun compile_do/4 }.
 compile_do(SP,RP,IP,WP) ->
     compile_only(),
     cf_push(here_()), cf_push(?CF_DO_SYS),
@@ -663,7 +768,7 @@ compile_qdo(SP,RP,IP,WP) ->
 
 %% LOOP immediate word
 compile_loop() ->
-    {?IMMEDIATE, <<"LOOP">>, fun compile_loop/4 }.
+    {?IMMEDIATE, <<"#LOOP">>, fun compile_loop/4 }.
 compile_loop(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
@@ -677,12 +782,12 @@ compile_loop(SP,RP,IP,WP) ->
 	    back_(Pos+2),
 	    forward_patch_(Pos+2);
 	_ -> 
-	    throw({-22, "loop missing DO/?DO"})
+	    throw({-22, "loop missing #DO/?DO"})
     end,
     next(SP,RP,IP,WP).
 
 compile_if() ->
-    { ?IMMEDIATE, <<"IF">>, fun compile_if/4}.
+    { ?IMMEDIATE, <<"#IF">>, fun compile_if/4}.
 compile_if(SP,RP,IP,WP) ->
     compile_only(),
     comma_(fun ffe:zbranch/0),    %% postpone 0branch
@@ -691,7 +796,7 @@ compile_if(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 compile_then() ->
-    { ?IMMEDIATE, <<"THEN">>, fun compile_then/4}.
+    { ?IMMEDIATE, <<"#THEN">>, fun compile_then/4}.
 compile_then(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
@@ -700,12 +805,11 @@ compile_then(SP,RP,IP,WP) ->
 	    forward_patch__(Pos),
 	    next(SP,RP,IP,WP);
 	_ ->
-	    throw({-22, "THEN missing IF/ELSE"})
+	    throw({-22, "#THEN missing #IF/#ELSE"})
     end.
 
-
 compile_else() ->
-    { ?IMMEDIATE, <<"ELSE">>, fun compile_else/4}.
+    { ?IMMEDIATE, <<"#ELSE">>, fun compile_else/4}.
 compile_else(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
@@ -717,14 +821,14 @@ compile_else(SP,RP,IP,WP) ->
 	    forward_patch__(Pos),
 	    next(SP,RP,IP,WP);
 	_ ->
-	    throw({-22, "ELSE missing IF"})
+	    throw({-22, "#ELSE missing #IF"})
     end.
 
 '_ffe_create'() ->
     {0, <<"CREATE">>, fun create/4}.
 create(SP,RP,IP,WP) ->
     Name = word($\s),
-    io:format("create word ~s\n", [Name]),
+    %% io:format("create word ~s\n", [Name]),
     here({0,Name,fun ffe:does0/4, 0}),
     cf_push(?CF_CREATE),
     next(SP, RP, IP, WP).
@@ -752,7 +856,7 @@ does(SP,RP,IP,WP) ->
 pdo() ->
     { 0, <<"(do)">>, fun pdo/4 }.
 pdo(_SP0=[I,N|SP],RP,IP,WP) ->
-    io:format("pdo: ~p\n", [_SP0]),
+    %% io:format("pdo: ~p\n", [_SP0]),
     next(SP,[I,N|RP],IP,WP).
 
 %% ?DO check condition before the loop
@@ -766,7 +870,6 @@ pqdo([_I,_N|SP],RP,{IP,Code},WP) ->
 ploop() ->
     {0, <<"(loop)">>, fun ploop/4 }.
 ploop(SP,[I|RP=[N|RP1]],{IP,Code},WP) ->
-    io:format("ploop: i=~w, n=~w, stack=~w\n", [I,N,SP]),
     if I < N-2 ->
 	    next(SP,[I+1|RP],{IP+element(IP,Code),Code},WP);
        true ->
@@ -782,6 +885,16 @@ i(SP,[Ix|_]=RP,IP,Code) ->
     {0, <<"j">>, fun j/4}.
 j(SP,[_,_,Jx|_]=RP,IP,Code) ->
     next([Jx|SP],RP,IP,Code).
+
+'_ffe_base'() ->
+    {0, <<"base">>, fun base/4 }.
+base(SP,RP,IP,Code) ->
+    next([{user,#user.base}|SP],RP,IP,Code).
+
+'_ffe_testu'() ->
+    {0, <<"testu">>, fun testu/4 }.
+testu(SP,RP,IP,Code) ->
+    next([{user,#user.testu}|SP],RP,IP,Code).
 
 '_ffe_fetch'() ->
     {0, <<"@">>, fun fetch/4 }.
@@ -808,8 +921,8 @@ fetch([Addr|SP],RP,IP,Code) ->
     {0, <<"!">>, fun store/4 }.
 store([Addr,Value|SP],RP,IP,Code) ->
     case Addr of
-	{user,_} -> 
-	    set_user(Addr,Value),
+	{user,Field} -> 
+	    set_user(Field,Value),
 	    next(SP,RP,IP,Code);
 	{sys,_} ->
 	    ets:insert(forth,{Addr,Value}),
@@ -933,17 +1046,8 @@ zbranch([_|SP],RP,{IP,Code},WP) ->
 '_ffe_dot'() ->
     {0, <<".">>, fun dot/4 }.
 dot([Value|SP],RP,IP,WP) ->
-    if is_integer(Value) ->
-	    erlang:display_string(integer_to_list(Value, base()));
-       is_float(Value) ->
-	    erlang:display_string(io_lib_format:fwrite_g(Value));
-       is_binary(Value) ->
-	    erlang:display_string(binary_to_list(Value));
-       is_pid(Value) ->
-	    erlang:display_string(pid_to_list(Value));
-       true -> %% hmm recursivly display integers in base()!
-	    erlang:display_string(lists:flatten(io_lib:format("~p",[Value])))
-    end,
+    emit_value(Value),
+    emit_char($\s),
     next(SP,RP,IP,WP).
 
 %% words manuplating stack only
@@ -1150,6 +1254,48 @@ string(SP,RP,IP,WP) ->
 	    next([String|SP],RP,IP,WP)
     end.
 
+emit_stack() ->
+    { 0, <<".s">>, fun emit_stack/4 }.
+emit_stack(SP, RP, IP, WP) ->
+    lists:foreach(fun(Value) ->
+			  emit_value(Value),
+			  emit_char($\s)
+		  end, lists:reverse(SP)),
+    next(SP, RP, IP, WP).
+
+emit_value(Value) ->
+    if is_integer(Value) ->
+	    emit_string(integer_to_list(Value, base()));
+       is_float(Value) ->
+	    emit_string(io_lib_format:fwrite_g(Value));
+       is_binary(Value) ->
+	    emit_string(binary_to_list(Value));
+       is_pid(Value) ->
+	    emit_string(pid_to_list(Value));
+       true -> %% hmm recursivly display integers in base()!
+	    emit_string(lists:flatten(io_lib:format("~p",[Value])))
+    end.    
+
+emit_words() ->
+    { 0, <<"words">>, fun emit_words/4 }.
+emit_words(SP, RP, IP, WP) ->
+    emit_dicts([current() | forth()]),
+    next(SP, RP, IP, WP).
+
+emit_dicts([Dict|Ds]) ->
+    emit_dict(Dict),
+    emit_dicts(Ds);
+emit_dicts([]) ->
+    ok.
+
+emit_dict(Dict) ->
+    maps:fold(
+      fun(Name, _Xt, _Acc) ->
+	      StrName = binary_to_list(Name),
+	      emit_string(StrName),
+	      emit_char($\s)
+      end, [], Dict).
+
 is_compiling() ->    
     (get_state() band ?COMPILE) =/= 0.
 
@@ -1171,3 +1317,6 @@ interpreting() ->
 	0 -> ok;
 	_ -> throw({-29, compiler_nesting})
     end.
+
+-include("strap.i").
+
