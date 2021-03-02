@@ -1,10 +1,16 @@
 
 \ module fmath
 
-\ ( x -- (x*x) )
-: sqr dup * ;
+\ square a number
+: sqr ( x -- x ) dup * ;
 
-\ ( <a1> .. <an> <n> -- <sum> )
-: sum 0 #DO + #LOOP ;
+\ sum u numbers on stack
+: sqrsum ( x1 .. xu u -- x ) 0 swap 0 #DO swap sqr + #LOOP ;
 
-: sqrsum 0 #DO sqr + #LOOP ;
+: sqrsum2 ( x1 x2 -- x ) sqr swap sqr + ;
+
+
+
+
+
+

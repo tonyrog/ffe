@@ -13,22 +13,22 @@
 -define(next(SP,RP,IP,WP),
 	ffe:next(SP,RP,IP,WP)).
 
--define(rote(SP,RP,IP,WP,Next),
+-define(rot(SP,RP,IP,WP,Next),
 	[A,B,C|SP1] = SP,
 	Next([C,A,B|SP1],RP,IP,WP)).
 
--define(rev_rote(SP,RP,IP,WP,Next),
+-define(m_rot(SP,RP,IP,WP,Next),
 	[A,B,C|SP1] = SP,
 	Next([B,C,A|SP1],RP,IP,WP)).
 
 -define(plus(SP,RP,IP,WP,Next),
 	case SP of
-	    [A,B|SP1] when is_number(A), is_number(B) ->
-		Next([A+B|SP1],RP,IP,WP);
-	    [A,{B,T}|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
-		Next([{A+B,T}|SP1],RP,IP,WP);
-	    [{A,T},B|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
-		Next([{A+B,T}|SP1],RP,IP,WP)
+	    [A,B|SP1] when is_integer(A), is_integer(B) ->
+		Next([A+B|SP1],RP,IP,WP)
+%%	    [A,{B,T}|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
+%%		Next([{A+B,T}|SP1],RP,IP,WP);
+%%	    [{A,T},B|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
+%%		Next([{A+B,T}|SP1],RP,IP,WP)
 	end).
 
 -define(one_plus(SP,RP,IP,WP,Next),
@@ -39,22 +39,38 @@
 		Next([{A+1,T}|SP1],RP,IP,WP)
 	end).
 
+-define(two_plus(SP,RP,IP,WP,Next),
+	case SP of
+	    [A|SP1] when is_integer(A) ->
+		Next([A+2|SP1],RP,IP,WP);
+	    [{A,T}|SP1] when is_integer(A), is_tuple(T) ->
+		Next([{A+2,T}|SP1],RP,IP,WP)
+	end).
+
 -define(minus(SP,RP,IP,WP,Next),
 	case SP of
-	    [A,B|SP1] when is_number(A), is_number(B) ->
-		Next([B-A|SP1],RP,IP,WP);
-	    [A,{B,T}|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
-		Next([{B-A,T}|SP1],RP,IP,WP);
-	    [{A,T},B|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
-		Next([{B-A,T}|SP1],RP,IP,WP)
+	    [A,B|SP1] when is_integer(A), is_integer(B) ->
+		Next([B-A|SP1],RP,IP,WP)
+%%	    [A,{B,T}|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
+%%		Next([{B-A,T}|SP1],RP,IP,WP);
+%%	    [{A,T},B|SP1] when is_integer(A), is_integer(B), is_tuple(T) ->
+%%		Next([{B-A,T}|SP1],RP,IP,WP)
 	end).
 
 -define(one_minus(SP,RP,IP,WP,Next),
 	case SP of
 	    [A|SP1] when is_integer(A) ->
-		Next([A-1|SP1],RP,IP,WP);
-	    [{A,T}|SP1] when is_integer(A), is_tuple(T) ->
-		Next([{A-1,T}|SP1],RP,IP,WP)
+		Next([A-1|SP1],RP,IP,WP)
+%%	    [{A,T}|SP1] when is_integer(A), is_tuple(T) ->
+%%		Next([{A-1,T}|SP1],RP,IP,WP)
+	end).
+
+-define(two_minus(SP,RP,IP,WP,Next),
+	case SP of
+	    [A|SP1] when is_integer(A) ->
+		Next([A-2|SP1],RP,IP,WP)
+%%	    [{A,T}|SP1] when is_integer(A), is_tuple(T) ->
+%%		Next([{A-2,T}|SP1],RP,IP,WP)
 	end).
 
 -define(star(SP,RP,IP,WP,Next),
@@ -97,7 +113,7 @@
 	[A,B|SP1] = SP,
 	Next([B,A|SP1],RP,IP,WP)).
 
--define(dupe(SP,RP,IP,WP,Next),
+-define(dup(SP,RP,IP,WP,Next),
 	[A|_] = SP,
 	Next([A|SP],RP,IP,WP)).
 

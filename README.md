@@ -32,13 +32,11 @@ If compiled then this is translated into the module foo.
     -export(['_ffe_sqr'/0,'_ffe_sum'/0]).
 	
     '_ffe_sqr'() ->
-        { 0, <<"sqr">>, fun ffe:docol/4, ffe:star/0, ffe:semis/0 }).
+        { 0, <<"sqr">>, fun ffe:docol/4, fun ffe:star/0, fun ffe:semis/0 }).
 
     '_ffe_sum'() ->
-        { 0, <<"sum">>, fun ffe:docol/4, ffe:lit/4, 0, 
-	  fun ffe:pdo/0, 
-	     fun fee:plus/0,
-          fun ffe:ploop/0, -2,
+        { 0, <<"sum">>, fun ffe:docol/4, fun ffe:lit/4, 0, 
+          fun ffe:pdo/0, fun fee:plus/0, fun ffe:ploop/0, -2,
          ffe:semis/0 }.
 
 CREATE DOES>
@@ -66,5 +64,4 @@ This is a defining word that creat a constant used like this
 This compiles into
 
     ten = 
-      fun() -> {0, <<"ten">>, fun ffe:does1/4.
-                {6, 
+      fun() -> {0, <<"ten">>, fun ffe:does1/4, 
