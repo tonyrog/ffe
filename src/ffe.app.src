@@ -1,6 +1,7 @@
 {application, ffe,
  [{description, "Forth Flavoured Erlang"},
   {vsn, git},
+  {modules, ["@@MODULES@@"]},
   {registered, []},
   {env, []},
   {applications,[kernel,stdlib]}
