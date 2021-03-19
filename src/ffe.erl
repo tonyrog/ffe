@@ -25,7 +25,9 @@
 	 in = 0,
 	 out = 0,
 	 state = 0,
-	 forth = [forth_words(),strap_words()],
+	 forth = [forth_words(),
+		  strap_words(),
+		  floating:words()],
 	 current = #{},    %% user defined words
 	 var = #{},        %% variables Ref => Value
 	 base = 10,
@@ -554,6 +556,21 @@ word(Ch) ->
 	    end
     end.
 
+%% TIB  = line buffer
+%% SPAN = offset in line buffer
+char() ->
+    In = in(),  %% >in @
+    case tib() of
+	Tib when In >= byte_size(Tib) ->
+	    case refill() of
+		eof -> eof;
+		_Count -> char()
+	    end;
+	<<_:In/binary,Char,_/binary>> ->
+	    in(In+1),
+	    Char
+    end.
+
 %% read a line and put it in TIB 
 refill() ->
     ALTIN = altin(),
@@ -764,6 +781,7 @@ forth_words() ->
       %% io
       ?WORD("emit",       emit),
       ?WORD("type",       type),
+      ?WORD("count",      count),
       ?WORD("cr",         cr),
       ?WORD("space",      space),
       ?WORD("spaces",     spaces),
@@ -775,7 +793,7 @@ forth_words() ->
       %% meta words - pre compile
       ?WORD(":",          colon),
       ?WORD(";",          semicolon),
-      ?WORD("constant",   compile_constant),
+      ?WORD("#CONSTANT",   compile_constant),
       ?WORD("variable",   compile_variable),
       ?WORD("value",      compile_value),
       ?WORD("user",       compile_user),
@@ -797,6 +815,9 @@ forth_words() ->
       ?WORD("\"",         string),
       ?WORD("'",          tick),
       ?WORD("[']",        bracket_tick),
+      ?WORD(".\"",        dot_quote),
+      ?WORD("char",       care),
+      ?WORD("[char]",     bracket_care),
 
       %% Utils - will be strapped later
       ?WORD(".s",         emit_stack),
@@ -856,7 +877,7 @@ semicolon(SP,RP,IP,WP) ->
 
 %% CONSTANT
 compile_constant() ->
-    { 0, <<"constant">>, fun ffe:compile_constant/4 }.
+    { 0, <<"#CONSTANT">>, fun ffe:compile_constant/4 }.
 compile_constant([Value|SP],RP,IP,WP) ->
     Name = word($\s),
     define(Name, fun() -> {0, Name, fun ffe:docon/4, Value } end),
@@ -1265,15 +1286,23 @@ cr(SP,RP,IP,WP) ->
     emit_char($\n),
     next(SP,RP,IP,WP).
 
+count() ->
+    {0, <<"count">>, fun ffe:count/4 }.
+count(SP=[Addr|_],RP,IP,WP) ->
+    if is_binary(Addr) ->
+	    next([byte_size(Addr)|SP],RP,IP,WP);
+       true ->
+	    next([0|SP],RP,IP,WP)
+    end.
+
 type() ->
     {0, <<"type">>, fun ffe:type/4 }.
-type([Addr,U|SP],RP,IP,WP) ->
-    case Addr of
-	<<Chars:U/binary, _/binary>> ->
-	    emit_chars(altout(), U, Chars),
+type([U,Addr|SP],RP,IP,WP) ->
+    if is_binary(Addr) ->
+	    emit_chars(altout(), U, Addr),
 	    next(SP,RP,IP,WP);
-	_ ->
-	    throw({?ARITH, "string range"})
+       true ->
+	    next(SP,RP,IP,WP)
     end.
 
 space() ->
@@ -1295,6 +1324,37 @@ dot() ->
 dot([Value|SP],RP,IP,WP) ->
     emit_value(Value),
     emit_char($\s),
+    next(SP,RP,IP,WP).
+
+%% print string
+%% ." String"
+%% compile: compile string literal that is printed at runtime
+dot_quote() ->
+    { ?IMMEDIATE, <<".\"">>, fun ffe:dot_quote/4 }.
+dot_quote(SP,RP,IP,WP) ->
+    compile_only(),
+    String = word($"),
+    comma_(fun ffe:lit/0),
+    comma_(String),
+    comma_(fun ffe:count/0),
+    comma_(fun ffe:type/0),
+    next(SP,RP,IP,WP).
+
+%% char
+care() ->
+    { 0, <<"char">>, fun ffe:care/4 }.
+care(SP,RP,IP,WP) ->
+    Char = char(),
+    next([Char|SP],RP,IP,WP).
+
+%% [char]
+bracket_care() ->
+    { ?IMMEDIATE, <<"[char]">>, fun ffe:bracket_care/4 }.
+bracket_care(SP,RP,IP,WP) ->
+    compile_only(),
+    Char = char(),
+    comma_(fun ffe:lit/0),
+    comma_(Char),
     next(SP,RP,IP,WP).
 
 %% words manuplating stack only
