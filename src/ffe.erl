@@ -25,9 +25,16 @@
 	 in = 0,
 	 out = 0,
 	 state = 0,
-	 forth = [forth_words(),
+	 forth = [
+		  internal_words(),
+		  core_words(),
+		  core_ext_words(),
+		  common_words(),
+		  tools_words(),
 		  strap_words(),
-		  floating:words()],
+		  floating:words(),
+		  floating_ext:words()
+		 ],
 	 current = #{},    %% user defined words
 	 var = #{},        %% variables Ref => Value
 	 base = 10,
@@ -61,6 +68,31 @@
 
 -define(UNTHREAD_NONE, 0).
 -define(UNTHREAD_ALL, 1000000).
+
+%%
+%% Forth word layout:
+%% { Flags :: smudge | immediate
+%%   Name  :: binary()
+%%   CFA   :: function/4
+%%   PF1   :: function/0 | term
+%%   PF2   :: function/0 | term
+%%   ...
+%%   PFn   :: function/0 | term
+%% }
+%%
+-define(FFA, 1).
+-define(NFA, 2).
+-define(CFA, 3).
+-define(PFA, 4).
+-define(ff(W), element(?FFA,(W))).        %% flags field
+-define(nf(W), element(?NFA,(W))).        %% name field
+-define(cf(W), element(?CFA,(W))).        %% code field :: fun/4
+-define(pf(I,W), element((?PFA-1)+(I),(W))). %% 1..n parameter field :: fun/0|term() 
+
+-define(set_ff(W, Flags), setelement(1, (W), (Flags))).
+-define(set_nf(W, Name), setelement(2, (W), (Name))).
+-define(set_cf(W, Code), setelement(3, (W), (Code))).
+-define(set_pf(I,W,Param), setelement(3+(I), (W), (Param))).
 
 -include("ffe.hrl").
 
@@ -164,9 +196,8 @@ save_dict(Fd, Module, Unthread, Dict) ->
 save_def(Fd, Module, Name, Unthread, Xt) ->
     W = Xt(),
     io:format(Fd, "~p() ->\n  {~w, ~p", 
-	      [binary_to_atom(Name),element(1,W),element(2,W)]),
+	      [binary_to_atom(Name),?ff(W),?nf(W)]),
     save_words(Fd, Module, 3, Unthread, W),
-    %% io:format(Fd, ",\n  fun ffe:semis/0", []),
     io:format(Fd, "}.\n", []),
     {Module,Name}.
 
@@ -184,14 +215,14 @@ save_word(Fd, Current, Unthread, W) when is_function(W) ->
 	    Def = W(),
 	    DoCol = fun ffe:docol/4,
 	    Semis = fun ffe:semis/4,
-	    case element(3,Def) of
+	    case ?cf(Def) of
 		DoCol ->
 		    if Unthread > 0 ->
 			    save_words(Fd, Current, 4, Unthread-1, Def);
 		       true ->
 			    io:format(Fd, ",\n  fun ~p:~p/0", 
 				      [list_to_atom(Current),
-				       binary_to_atom(element(2,Def))])
+				       binary_to_atom(?nf(Def))])
 		    end;
 		Semis ->
 		    if Unthread =:= ?UNTHREAD_ALL;
@@ -248,13 +279,13 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 	    ModStr = if Module =:= ffe -> "";
 			true -> atom_to_list(Module)++":"
 		     end,
-	    case element(3,Def) of
+	    case ?cf(Def) of
 		DoCol ->
 		    Def = W(),
 		    if Unthread > 0 ->
 			    show_words_(Fd, 4, Unthread-1, Def);
 		       true ->
-			    Name = element(2, Def),
+			    Name = ?nf(Def),
 			    emit_char(Fd, $\s),
 			    emit_string(Fd, ModStr),
 			    emit_string(Fd, Name)
@@ -262,7 +293,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 		Semis ->
 		    ok;
 		_ ->
-		    Name = element(2, Def),
+		    Name = ?nf(Def),
 		    emit_char(Fd, $\s),
 		    emit_string(Fd, ModStr),
 		    emit_string(Fd, Name)		    
@@ -393,6 +424,7 @@ main_number(Compile,Name,SP) ->
 	    main([Int|SP])
     catch
 	error:_ ->
+	    %% FIXME: check for floating support!
 	    try binary_to_float(Name) of
 		Flt when Compile ->
 		    comma_(fun ffe:lit/0),
@@ -402,7 +434,7 @@ main_number(Compile,Name,SP) ->
 		    main([Flt|SP])
 	    catch
 		?EXCEPTION(error,_Error,_Trace) ->
-		    io:format("undef ~s\n", [Name]),
+		    io:format("~s ?\n", [Name]),
 		    quit0()
 	    end
     end.
@@ -413,9 +445,17 @@ to_integer(<<$$,Cs/binary>>, _Base) ->
 to_integer(Cs, Base) ->
     binary_to_integer(Cs, Base).
 
+%% stub for return after exec
+exec_ret() ->
+    {0,<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0}.
+exec_ret(_SP,_RP,_IP,_WP) ->
+    erlang:display("INTERNAL ERROR\n"),
+    throw({?QUIT, quit}).
+
 exec(W, SP) ->
-    CFA = element(3,W),
-    try CFA(SP,[],{4,{0,<<"lexec">>,0,fun ret/0}},{4,W}) of
+    CFA = ?cf(W),
+    R = exec_ret(),
+    try CFA(SP,[],?WPTR(4,R),?WPTR(4,W)) of
 	SP1 -> main(SP1)
     catch
 	throw:{?BYE=_Code,_Reason} ->
@@ -432,7 +472,7 @@ exec(W, SP) ->
 	    CallStack = ?GET_STACK(_StackTrace),
 	    Calls = string:join(callstack(CallStack), " "),
 	    %% fixme: print forth word where error occured 
-	    io:format("error: stack under flow\n", []),
+	    io:format("Stack empty\n", []),
 	    io:format("  call: ~p\n", [Calls]),
 	    io:format("  call stack: ~p\n", [CallStack]),
 	    quit0();
@@ -440,14 +480,14 @@ exec(W, SP) ->
 	    CallStack = ?GET_STACK(_StackTrace),
 	    Calls = string:join(callstack(CallStack), " "),
 	    %% fixme: print forth word where error occured 
-	    io:format("error: stack under flow\n", []),
+	    io:format("Stack empty\n", []),
 	    io:format("  call: ~p\n", [Calls]),
 	    io:format("  call stack: ~p\n", [CallStack]),
 	    quit0();
 
 	?EXCEPTION(error,Reason,_StackTrace) ->
 	    CallStack = ?GET_STACK(_StackTrace),
-	    io:format("error: internal error: ~p\n", [Reason]),
+	    io:format("Internal error: ~p\n", [Reason]),
 	    io:format("  call stack: ~p\n", [CallStack]),	    
 	    quit0()
     end.
@@ -459,34 +499,6 @@ callstack([_ | _Stack]) ->
 callstack([]) ->
     [].
 
-%% [CODE']
-%% [']
-
-bracket_tick() ->
-    { ?IMMEDIATE, <<"[']">>, fun ffe:bracket_tick_/4 }.
-%% compile only 
-bracket_tick_(SP,RP,IP,WP) ->
-    compile_only(),
-    Name = word($\s),
-    case tick_(Name) of
-	{_,Xt} -> 
-	    comma_(Xt),
-	    next(SP, RP, IP, WP);
-	false -> 
-	    throw({?UNDEF, Name})
-    end.
-
-tick() ->
-    { 0, <<"'">>, fun ffe:tick_/4 }.
-%% lookup a word
-tick_(SP, RP, IP, WP) ->
-    Name = word($\s),
-    case tick_(Name) of
-	{_,Xt} -> 
-	    next([Xt|SP], RP,IP, WP);
-	false -> 
-	    throw({?UNDEF, Name})
-    end.
 
 tick_(Name) ->
     find_word_(Name).
@@ -515,7 +527,7 @@ find_word_(Name) ->
 	    end;
 	{ok,Xt} ->
 	    W = Xt(),
-	    if element(1,W) band ?IMMEDIATE  =:= ?IMMEDIATE ->
+	    if ?ff(W) band ?IMMEDIATE  =:= ?IMMEDIATE ->
 		    {true,Xt};
 	       true ->
 		    {false,Xt}
@@ -537,18 +549,26 @@ lookup_word_(_Name, []) ->
 %% TIB  = line buffer
 %% SPAN = offset in line buffer
 word(Ch) ->
+    parse_(Ch,true).
+parse(Ch) ->
+    parse_(Ch,false).
+
+parse_(Ch,DoDrop) ->
     In = in(),  %% >in @
     case tib() of
 	Tib when In >= byte_size(Tib) ->
 	    case refill() of
 		eof -> eof;
-		_Count -> word(Ch)
+		_Count -> parse_(Ch,DoDrop)
 	    end;
 	<<_:In/binary,Data/binary>> ->
-	    case enclose(Ch,Data) of
+	    case enclose(Ch,Data,DoDrop) of
+		[_N1,0,0] when not DoDrop->
+		    in(In+1),
+		    <<>>;
 		[_N1,N2,0] ->
 		    in(In+N2+1),
-		    word(Ch);
+		    parse_(Ch,DoDrop);
 		[N1,N2,Len] ->
 		    <<_:N1/binary,Word:Len/binary,_/binary>> = Data,
 		    in(In+N2+1),
@@ -656,9 +676,9 @@ collect_line([], N, Acc) ->
 %%  n1 = offset to first none ch char (word start)
 %%  n2 = offset to last char in word (word stop)
 %%  n3 = length of enclosed data
-enclose(Ch,Data) ->
+enclose(Ch,Data,DoDrop) ->
     Len = byte_size(Data),
-    N1 = drop(Ch, Data, 0),
+    N1 = if DoDrop -> drop(Ch, Data, 0); true -> 0 end,
     N2 = take(Ch, Data, N1),
     if N2 < Len -> [N1,N2,(N2-N1)];
        true -> [N1,N2,(N2-N1)]
@@ -697,11 +717,9 @@ find_first_arity(M,F) ->
 	[{_,A}|_] -> A
     end.
     
--define(WORD(Name,Call), <<Name>> => fun ffe:Call/0).
-
 %% "primitive" forth words, we may compile some of them soon
 %%  this "dictionary" should/must? be constant
-forth_words() ->
+internal_words() ->
     #{
       ?WORD("(docol)",    docol),
       ?WORD("(dousr)",    dousr),
@@ -725,12 +743,10 @@ forth_words() ->
       ?WORD("(do)",       pdo),
       ?WORD("(?do)",      pqdo),
       ?WORD("(loop)",     ploop),
-      ?WORD("noop",       noop),
-      ?WORD("base",       base),
-      ?WORD("testu",      testu),
+      ?WORD("noop", noop),
+      ?WORD("base", base),
+      ?WORD("testu", testu),  %% TESTING!!! user area
       
-      ?WORD("@",          fetch),
-      ?WORD("!",          store),
       ?WORD("sp@",        spat),
       ?WORD("rp@",        rpat),
       ?WORD("sp!",        spstore),
@@ -738,90 +754,41 @@ forth_words() ->
       ?WORD("i",          i),
       ?WORD("j",          j),
       ?WORD("leave",      leave),
-      ?WORD(">r",         tor),
-      ?WORD("r>",         rfrom),
-      
-      ?WORD("rot",        rot),
+
       ?WORD("-rot",       rrot),
-      
-      ?WORD("+",          plus),
-      ?WORD("-",          minus),
-      ?WORD("1-",         one_minus),
-      ?WORD("1+",         one_plus),
-      ?WORD("2-",         two_minus),
-      ?WORD("2+",         two_plus),
-      ?WORD("*",          star),
-      ?WORD("/",          slash),
-      ?WORD("mod",        mod),
-      ?WORD("/mod",       slash_mod),
-      ?WORD("negate",     negate),
-      ?WORD("over",       over),
-      ?WORD("drop",       drop),
-      ?WORD("swap",       swap),
-      ?WORD("dup",        dup),
-      ?WORD("lshift",     lshift),
-      ?WORD("rshift",     rshift),
-      ?WORD("arshift",    arshift),
-      ?WORD("abs",        abs),
-      ?WORD("min",        min),
-      ?WORD("max",        max),
-      ?WORD("invert",     invert),
-      ?WORD("and",        'and'),
-      ?WORD("or",         'or'),
-      ?WORD("xor",        'xor'),
-      ?WORD("0=",         zero_equals),
-      ?WORD("0<",         zero_less),
+
       ?WORD("0",          zero),
       ?WORD("1",          one),
       ?WORD("-1",         minus_one),
       
       %% system 
-      ?WORD("quit",       quit),
       ?WORD("bye",        bye),
-      %% io
-      ?WORD("emit",       emit),
-      ?WORD("type",       type),
-      ?WORD("count",      count),
-      ?WORD("cr",         cr),
-      ?WORD("space",      space),
-      ?WORD("spaces",     spaces),
-      
       
       ?WORD("create",     create),
       ?WORD("does>",      does),
       
       %% meta words - pre compile
-      ?WORD(":",          colon),
-      ?WORD(";",          semicolon),
-      ?WORD("#CONSTANT",   compile_constant),
+      ?WORD("constant",   compile_constant),
       ?WORD("variable",   compile_variable),
       ?WORD("value",      compile_value),
       ?WORD("user",       compile_user),
       ?WORD("to",         to),
-      ?WORD("#DO",        compile_do),
-      ?WORD("?DO",        compile_qdo),
-      ?WORD("#LOOP",      compile_loop),
-      ?WORD("#IF",        compile_if),
-      ?WORD("#THEN",      compile_then),
-      ?WORD("#ELSE",      compile_else),
-      ?WORD(",",          comma),
+      ?WORD("do",         compile_do),
+      ?WORD("?do",        compile_qdo),
+      ?WORD("loop",       compile_loop),
+      ?WORD("if",         compile_if),
+      ?WORD("then",       compile_then),
+      ?WORD("else",       compile_else),
       
       ?WORD("\\",         backslash),
       ?WORD("(",          paren),
-      ?WORD("[",          left_bracket),
-      ?WORD("]",          right_bracket),
-      ?WORD(".",          dot),
-      ?WORD("#LIT",       lit),
+      ?WORD("(lit)",      lit),
+      ?WORD("literal",    literal),
       ?WORD("\"",         string),
-      ?WORD("'",          tick),
-      ?WORD("[']",        bracket_tick),
-      ?WORD(".\"",        dot_quote),
-      ?WORD("char",       care),
-      ?WORD("[char]",     bracket_care),
 
+      ?WORD("char",       care),
       %% Utils - will be strapped later
-      ?WORD(".s",         emit_stack),
-      ?WORD("words",      emit_words),
+
       ?WORD("remove",     remove_word),
       ?WORD("show",       show_word),
       ?WORD("unthread",   unthread_word)
@@ -831,93 +798,90 @@ forth_words() ->
 %% General word layout
 %% {Flags, <<"Name">>, fun cfa/4, fun pf1/0, ... fun pfn/0}
 %%
-next(SP,RP,{IP,Code},{_WP,_W}) ->
-    WF = element(IP, Code),  %% function returning tuple def
-    %% io:format("WF = ~p\n", [WF]),
-    W = WF(),                %% tuple word
-    %% io:format("next: ~s (~w) stack: ~p\n", [element(2,W),WF,SP]),
-    CFA = element(3,W),      %% CFA is located
-    CFA(SP,RP,{IP+1,Code},{4,W}).
+next(SP,RP,?WPTR(IP,Code),?WPTR(_WP,_W)) ->
+    PF = element(IP, Code),  %% code parameter 
+    W = PF(),                %% tuple word
+    CFA = ?cf(W),            %% read CFA
+    PFA1 = ?WPTR(4,W),       %% point to first "parameter"
+    CFA(SP,RP,?WPTR(IP+1,Code),PFA1).
 
-%% colon definition
-colon() ->
-    { ?IMMEDIATE, <<":">>, fun ffe:colon/4 }.
-colon(SP, RP, IP, WP) ->
-    interpreting(),
-    cf_reset(),
-    set_state(?COMPILE),
-    Name = word($\s),
-    here({0,Name,fun ffe:docol/4}),
-    next(SP, RP, IP, WP).
+add_addr(?WPTR(Y,W), X) when is_integer(X) -> ?WPTR(Y+X,W);
+add_addr(Y, X) when is_integer(Y) -> Y+X.
+
+%% fetch value at address
+fetch_at(Addr) ->
+    case Addr of
+	{var,Var} ->
+	    get_value(Var);
+	{user,Field} ->
+	    case get_user(Field) of
+		undefined -> 0;
+		V -> V
+	    end;
+	{sys,_} ->
+	    case ets:lookup(forth,Addr) of
+		[] -> 0;
+		[{_,V}] -> V
+	    end;
+	?WPTR(I,W) ->
+	    element(I,W)
+    end.
+
+store_at(Addr,X) ->
+    case Addr of
+	{var,Var} ->
+	    set_value(Var, X);
+	{user,Field} -> 
+	    set_user(Field, X);
+	{sys,_} ->
+	    ets:insert(forth,{Addr,X})
+    end.
 
 smudge() ->
     { 0, <<"smudge">>, fun ffe:smudge/4 }.
 smudge(SP, RP, IP, WP) ->
-    %% different than standard
     Def = here(),
-    Def1 = setelement(1, Def, element(1, Def) bxor ?SMUDGE),
+    Def1 = ?set_ff(Def, ?ff(Def) bxor ?SMUDGE),
     here(Def1),
     next(SP, RP, IP, WP).
 
-semicolon() ->
-    { ?IMMEDIATE, <<";">>, fun semicolon/4 }.
-semicolon(SP,RP,IP,WP) ->
-    compile_only(),
-    case csp() of
-	[] ->
-	    Def = comma_(fun ffe:semis/0),
-	    Name = element(2, Def),
-	    define(Name, fun() -> Def end),
-	    here({}),  %% clear defintion area
-	    set_state(0),
-	    next(SP,RP,IP,WP);
-	_ ->
-	    throw({-22, control_structure})
-    end.
 
 %% CONSTANT
-compile_constant() ->
-    { 0, <<"#CONSTANT">>, fun ffe:compile_constant/4 }.
+?XT("constant", compile_constant).
 compile_constant([Value|SP],RP,IP,WP) ->
     Name = word($\s),
-    define(Name, fun() -> {0, Name, fun ffe:docon/4, Value } end),
+    Def = {0, Name, fun ?MODULE:docon/4, Value }, 
+    define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
 %% VARIABLE
-compile_variable() ->
-    { 0, <<"variable">>, fun ffe:compile_variable/4 }.
+?XT("variable", compile_variable).
 compile_variable(SP,RP,IP,WP) ->
     Name = word($\s),
     Var = make_variable_ref(),
-    define(Name, fun() -> {0, Name, fun ffe:dovar/4, Var } end),
+    Def = {0, Name, fun ?MODULE:dovar/4, Var },
+    define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
 %% VALUE
-compile_value() ->
-    { 0, <<"value">>, fun ffe:compile_value/4 }.
+?XT("value", compile_value).
 compile_value([Value|SP],RP,IP,WP) ->
     Name = word($\s),
     Var = make_variable_ref(),
     set_value(Var, Value),
-    define(Name, fun() -> {0, Name, fun ffe:doval/4, Var } end),
+    Def = {0, Name, fun ?MODULE:doval/4, Var },
+    define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
 make_variable_ref() ->
     {var, erlang:unique_integer([])}.
 
-%% USER - ffe compiler
 compile_user() ->
-    { 0, <<"user">>, fun ffe:compile_user/4 }.
+    { 0, <<"user">>, fun ?MODULE:compile_user/4 }.
 compile_user([Value|SP],RP,IP,WP) ->
     Name = word($\s),
-    define(Name, fun() -> {0, Name, fun ffe:dousr/4, Value } end),
-    next(SP,RP,IP,WP).
-
-%% , is currently a bit special
-comma() ->
-    {0, <<",">>, fun ffe:comma/4 }.
-comma([Value|SP],RP,IP,WP) ->
-    comma_(Value),
+    Def = {0, Name, fun ?MODULE:dousr/4, Value },
+    define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
 comma_(Value) ->
@@ -942,9 +906,8 @@ forward_patch__(Pos) ->
     here(erlang:setelement(Pos+1,Here,Offset-1)).
     
 
-%% #DO - ffe compiler, immediate word
-compile_do() ->
-    {?IMMEDIATE, <<"#DO">>, fun ffe:compile_do/4 }.
+%% DO - ffe compiler, immediate word
+?IXT("do", compile_do).
 compile_do(SP,RP,IP,WP) ->
     compile_only(),
     cf_push(here_()), cf_push(?CF_DO_SYS),
@@ -952,8 +915,7 @@ compile_do(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 %% ?DO immediate word
-compile_qdo() ->
-    {?IMMEDIATE, <<"?DO">>, fun ffe:compile_qdo/4 }.
+?IXT("?do", compile_qdo).
 compile_qdo(SP,RP,IP,WP) ->
     compile_only(),
     cf_push(here_()), cf_push(?CF_QDO_SYS),
@@ -962,36 +924,33 @@ compile_qdo(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 %% LOOP immediate word
-compile_loop() ->
-    {?IMMEDIATE, <<"#LOOP">>, fun ffe:compile_loop/4 }.
+?IXT("loop", compile_loop).
 compile_loop(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
 	?CF_DO_SYS ->
-	    comma_(fun ffe:ploop/0),
+	    comma_(fun ?MODULE:ploop/0),
 	    Pos = cf_pop(),
 	    back_(Pos+1);
 	?CF_QDO_SYS ->
-	    comma_(fun ffe:ploop/0),
+	    comma_(fun ?MODULE:ploop/0),
 	    Pos = cf_pop(),
 	    back_(Pos+2),
 	    forward_patch_(Pos+2);
 	_ -> 
-	    throw({-22, "loop missing #DO/?DO"})
+	    throw({-22, "loop missing DO/?DO"})
     end,
     next(SP,RP,IP,WP).
 
-compile_if() ->
-    { ?IMMEDIATE, <<"#IF">>, fun ffe:compile_if/4}.
+?IXT("if", compile_if).
 compile_if(SP,RP,IP,WP) ->
     compile_only(),
-    comma_(fun ffe:zbranch/0),    %% postpone 0branch
+    comma_(fun ?MODULE:zbranch/0),    %% postpone 0branch
     cf_push(here_()), cf_push(?CF_ORIG),
     comma_(0),  %% patch this place
     next(SP,RP,IP,WP).
 
-compile_then() ->
-    { ?IMMEDIATE, <<"#THEN">>, fun ffe:compile_then/4}.
+?IXT("then", compile_then).
 compile_then(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
@@ -1000,47 +959,44 @@ compile_then(SP,RP,IP,WP) ->
 	    forward_patch__(Pos),
 	    next(SP,RP,IP,WP);
 	_ ->
-	    throw({-22, "#THEN missing #IF/#ELSE"})
+	    throw({-22, "THEN missing IF/ELSE"})
     end.
 
-compile_else() ->
-    { ?IMMEDIATE, <<"#ELSE">>, fun ffe:compile_else/4}.
+?IXT("else", compile_else).
 compile_else(SP,RP,IP,WP) ->
     compile_only(),
     case cf_pop() of
 	?CF_ORIG ->
 	    Pos = cf_pop(),
-	    comma_(fun ffe:branch/0),    %% postpone 0branch
+	    comma_(fun ?MODULE:branch/0),    %% postpone 0branch
 	    cf_push(here_()), cf_push(?CF_ORIG),
 	    comma_(0),  %% patch this place
 	    forward_patch__(Pos),
 	    next(SP,RP,IP,WP);
 	_ ->
-	    throw({-22, "#ELSE missing #IF"})
+	    throw({-22, "ELSE missing IF"})
     end.
 
-create() ->
-    {0, <<"create">>, fun ffe:create/4}.
+?XT("create", create).
 create(SP,RP,IP,WP) ->
     Name = word($\s),
     %% io:format("create word ~s\n", [Name]),
-    here({0,Name,fun ffe:does0/4, 0}),
+    Does0 = {0,Name,fun ?MODULE:does0/4, 0},
+    here(Does0),
     cf_push(?CF_CREATE),
     next(SP, RP, IP, WP).
 
-does() ->
-    { 0, <<"does>">>, fun ffe:does/4 }.
+?XT("does>", does).
 does(SP,RP,IP,WP) ->
     case csp() of
 	[?CF_CREATE|Csp] -> %% only in create?
-	    %% use this position as landing point for the word beeing defined
 	    Def0 = here(),
-	    Name = element(2, Def0),
-	    Def1 = setelement(3, Def0, fun ffe:does1/4),
-	    {DoesPos,DoesCode} = IP,
-	    DoesName = element(2, DoesCode),
+	    Name = ?nf(Def0),
+	    Def1 = ?set_cf(Def0, fun ?MODULE:does1/4),
+	    ?WPTR(DoesPos,DoesCode) = IP,
+	    DoesName = ?nf(DoesCode),
 	    {_, DoesXt} = find_word_(DoesName),
-	    Def2 = setelement(4, Def1, {DoesPos,DoesXt}),
+	    Def2 = ?set_pf(1,Def1,?WPTR(DoesPos,DoesXt)),
 	    define(Name, fun() -> Def2 end),
 	    here({}),  %% clear defintion area
 	    csp(Csp),  %% pop control stack
@@ -1048,51 +1004,42 @@ does(SP,RP,IP,WP) ->
 	    next(SP,RP1,IP1,WP)
     end.
     
-pdo() ->
-    { 0, <<"(do)">>, fun ffe:pdo/4 }.
+?XT("(do)", pdo).
 pdo(_SP0=[I,N|SP],RP,IP,WP) ->
-    %% io:format("pdo: ~p\n", [_SP0]),
     next(SP,[I,N|RP],IP,WP).
 
 %% ?DO check condition before the loop
-pqdo() ->
-    { 0, <<"(?do)">>, fun ffe:pqdo/4 }.
-pqdo([I,N|SP],RP,{IP,Code},WP) when I < N ->
-    next(SP,[I,N|RP],{IP+1,Code},WP);
-pqdo([_I,_N|SP],RP,{IP,Code},WP) ->
-    next(SP,RP,{IP+element(IP,Code),Code},WP).
+?XT("(?do)", pqdo).
+pqdo([I,N|SP],RP,?WPTR(IP,Code),WP) when I < N ->
+    next(SP,[I,N|RP],?WPTR(IP+1,Code),WP);
+pqdo([_I,_N|SP],RP,?WPTR(IP,Code),WP) ->
+    next(SP,RP,?WPTR(IP+element(IP,Code),Code),WP).
 
-ploop() ->
-    {0, <<"(loop)">>, fun ffe:ploop/4 }.
-ploop(SP,[I|RP=[N|RP1]],{IP,Code},WP) ->
+?XT("(loop)", ploop).
+ploop(SP,[I|RP=[N|RP1]],?WPTR(IP,Code),WP) ->
     if I < N-2 ->
-	    next(SP,[I+1|RP],{IP+element(IP,Code),Code},WP);
+	    next(SP,[I+1|RP],?WPTR(IP+element(IP,Code),Code),WP);
        true ->
-	    next(SP,RP1,{IP+1,Code},WP)
+	    next(SP,RP1,?WPTR(IP+1,Code),WP)
     end.
 
-i() ->
-    {0, <<"i">>, fun ffe:i/4}.
+?XT("i", i).
 i(SP,[Ix|_]=RP,IP,Code) ->
     next([Ix|SP],RP,IP,Code).
 
-j() ->
-    {0, <<"j">>, fun ffe:j/4}.
+?XT("j", j).
 j(SP,[_,_,Jx|_]=RP,IP,Code) ->
     next([Jx|SP],RP,IP,Code).
 
-base() ->
-    {0, <<"base">>, fun ffe:base/4 }.
+?XT("base", base).
 base(SP,RP,IP,Code) ->
     next([{user,#user.base}|SP],RP,IP,Code).
 
-testu() ->
-    {0, <<"testu">>, fun ffe:testu/4 }.
+?XT("textu", testu).
 testu(SP,RP,IP,Code) ->
     next([{user,#user.testu}|SP],RP,IP,Code).
 
-to() ->
-    {0, <<"to">>, fun ffe:to/4 }.
+?XT("to", to).
 to([Value|SP],RP,IP,Code) ->
     Name = word($\s),
     case find_word_(Name) of
@@ -1104,99 +1051,46 @@ to([Value|SP],RP,IP,Code) ->
 	    throw({?UNDEF, Name})
     end.
 
-fetch() ->
-    {0, <<"@">>, fun ffe:fetch/4 }.
-fetch([Addr|SP],RP,IP,Code) ->
-    case Addr of
-	{var,Var} ->
-	    Value = get_value(Var),
-	    next([Value|SP],RP,IP,Code);
-	{user,Field} ->
-	    Value = case get_user(Field) of
-			undefined -> 0;
-			V -> V
-		    end,
-	    next([Value|SP],RP,IP,Code);
-	{sys,_} ->
-	    Value = case ets:lookup(forth,Addr) of
-			[] -> 0;
-			[{_,V}] -> V
-		    end,
-	    next([Value|SP],RP,IP,Code);
-
-	{Pos,Cells} when is_integer(Pos), is_tuple(Cells) ->
-	    next([element(Pos,Cells)|SP],RP,IP,Code)
-    end.
-
-    
-
-store() ->
-    {0, <<"!">>, fun ffe:store/4 }.
-store([Addr,Value|SP],RP,IP,Code) ->
-    case Addr of
-	{var,Var} ->
-	    set_value(Var, Value),
-	    next(SP,RP,IP,Code);
-	{user,Field} -> 
-	    set_user(Field,Value),
-	    next(SP,RP,IP,Code);
-	{sys,_} ->
-	    ets:insert(forth,{Addr,Value}),
-	    next(SP,RP,IP,Code)
-    end.
-
-leave() ->
-    {0, <<"leave">>, fun ffe:leave/4 }.
+?XT("leave", leave).
 leave(SP,[_,RP=[Limit|_]],IP,WP) ->
     next(SP,[Limit|RP],IP,WP).
 
-tor() ->
-    {0, <<">r">>, fun ffe:tor/4 }.
-tor([E|SP],RP,IP,WP) ->
-    next(SP,[E|RP],IP,WP).
-
-rfrom() ->
-    {0, <<"r>">>, fun ffe:rfrom/4 }.
-rfrom(SP,[E|RP],IP,WP) ->
-    next([E|SP],RP,IP,WP).
-
-quit() ->
-    {0, <<"quit">>, fun ffe:quit/4 }.
-quit(_SP,_RP,_IP,_WP) ->
-    throw({?QUIT, quit}).
-
-bye() ->
-    {0, <<"bye">>, fun ffe:bye/4 }.
+?XT("bye", bye).
 bye(_SP,_RP,_IP,_WP) ->
     throw({?BYE, exit}).
 
-ret() ->
-    { 0, <<"ret">>, fun ffe:ret/4 }.
+?XT("ref", ret).
 ret(SP,_RP,_IP,_Code) ->
     SP.
 
-noop() ->
-    { 0, <<"noop">>, fun ffe:noop/4 }.
+?XT("noop", noop).
 noop(SP,RP,I,Code) ->
     next(SP,RP,I,Code).
 
-lit() ->
-    { 0, <<"lit">>, fun ffe:lit/4 }.
-lit(SP,RP,{IP,Code},WP) ->
-    next([element(IP,Code)|SP],RP,{IP+1,Code},WP).
+?XT("(lit)", lit).
+lit(SP,RP,?WPTR(IP,Code),WP) ->
+    next([element(IP,Code)|SP],RP,?WPTR(IP+1,Code),WP).
+
+?IXT("literal", literal).
+literal(SP,RP,IP,WP) ->
+    compile_only(),
+    [X|SP1] = SP,
+    comma_(fun ffe:lit/0),
+    comma_(X),
+    next(SP1,RP,IP,WP).
 
 execut() ->
     { 0, <<"execut">>, fun ffe:execut/4 }.
-execut([WP|SP],RP,IP,_WP) ->
-    W = WP(),            %% tuple word
-    CFA = element(3,W),  %% CFA is located
-    CFA(SP,RP,IP,{4,W}).
+execut([Xt|SP],RP,IP,_WP) ->
+    W = Xt(),            %% tuple word
+    CFA = ?cf(W),        %% get code field
+    CFA(SP,RP,IP,?WPTR(?PFA,W)).
 
 %% WP points to current executing word, move that to point to the
 %% new word PFA area
-dodoes(SP,RP,IP,WP={Wi,W}) ->
+dodoes(SP,RP,IP,WP=?WPTR(Wi,W)) ->
     W1 = element(Wi-1,W()),
-    WP1 = {4,W1},
+    WP1 = ?WPTR(?PFA,W1),
     docol([WP|SP],RP,IP,WP1).
 
 docol() ->
@@ -1206,39 +1100,39 @@ docol(SP,RP,IP,WP) ->
 
 docon() ->
     { 0, <<"(docon)">>, fun ffe:docon/4 }.
-docon(SP,RP,IP,WP0={W,WP}) ->
+docon(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     %% io:format("do con WP0 = ~w\n", [WP0]),
     next([element(W,WP)|SP],RP,IP,WP0).
 
 dousr() ->
     { 0, "(dousr)", fun ffe:dousr/4 }.
-dousr(SP,RP,IP,WP0={W,WP}) ->
+dousr(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([{user,element(W,WP)}|SP],RP,IP,WP0).
 
 dovar() ->
     { 0, <<"(dovar)">>, fun ffe:dovar/4 }.
-dovar(SP,RP,IP,WP0={W,WP}) ->
+dovar(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([element(W,WP)|SP],RP,IP,WP0).
 
 doval() ->
     { 0, <<"(doval)">>, fun ffe:doval/4 }.
-doval(SP,RP,IP,WP0={W,WP}) ->
+doval(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([get_value(element(W,WP))|SP],RP,IP,WP0).
 
 %% default does code with no offset
-does0(SP,RP,{IP,Code},WP={Pos,Wf}) ->
-    next([{Pos+1,Wf}|SP],RP,{IP+1,Code},WP).
+does0(SP,RP,?WPTR(IP,Code),WP=?WPTR(Pos,Wf)) ->
+    next([?WPTR(Pos+1,Wf)|SP],RP,?WPTR(IP+1,Code),WP).
 
 %% does with offset to does> code
 does1() ->
-    { 0, <<"(does>)">>, fun ffe:does1/4 }.
-does1(SP,RP,IP,WP={Pos,Wft}) ->
+    { 0, <<"(does>)">>, fun ?MODULE:does1/4 }.
+does1(SP,RP,IP,WP=?WPTR(Pos,Wft)) ->
     %% io:format("WP = ~w\n", [WP]),
-    {XPos,Xt} = element(Pos, Wft),
-    next([{Pos+1,Wft}|SP],[IP|RP],{XPos,Xt()},WP).
+    ?WPTR(XPos,Xt) = element(Pos, Wft),
+    next([?WPTR(Pos+1,Wft)|SP],[IP|RP],?WPTR(XPos,Xt()),WP).
 
 semis() ->    
-    { 0, "(semis)", fun ffe:semis/4 }.
+    { 0, "(semis)", fun ?MODULE:semis/4 }.
 semis(SP,[IP|RP],_IP,WP) ->
     %% special treat when reach ';' while doing create and 
     %% does> is not found
@@ -1257,28 +1151,16 @@ semis(SP,[IP|RP],_IP,WP) ->
 
 branch() ->
     {0, <<"branch">>, fun ffe:branch/4 }.
-branch(SP,RP,{IP,Code},WP) ->
-    next(SP,RP,{IP+element(IP,Code),Code},WP).
+branch(SP,RP,?WPTR(IP,Code),WP) ->
+    next(SP,RP,?WPTR(IP+element(IP,Code),Code),WP).
 
 zbranch() ->
     {0, <<"0branch">>, fun ffe:zbranch/4 }.
-zbranch([0|SP],RP,{IP,Code},WP) ->
+zbranch([0|SP],RP,?WPTR(IP,Code),WP) ->
     Offset = element(IP,Code),
-    next(SP,RP,{IP+Offset,Code},WP);
+    next(SP,RP,?WPTR(IP+Offset,Code),WP);
 zbranch([_|SP],RP,{IP,Code},WP) ->
-    next(SP,RP,{IP+1,Code},WP).
-
-
-%% emit character
-emit() ->
-    {0, <<"emit">>, fun ffe:emit/4 }.
-emit([Char|SP],RP,IP,WP) ->
-    if is_integer(Char), Char >= 0, Char =< 255 ->
-	    emit_char(Char),
-	    next(SP,RP,IP,WP);
-       true ->
-	    throw({?ARITH, "character range"})
-    end.
+    next(SP,RP,?WPTR(IP+1,Code),WP).
 
 cr() ->
     {0, <<"cr">>, fun ffe:cr/4 }.
@@ -1295,8 +1177,7 @@ count(SP=[Addr|_],RP,IP,WP) ->
 	    next([0|SP],RP,IP,WP)
     end.
 
-type() ->
-    {0, <<"type">>, fun ffe:type/4 }.
+?XT("type", type).
 type([U,Addr|SP],RP,IP,WP) ->
     if is_binary(Addr) ->
 	    emit_chars(altout(), U, Addr),
@@ -1305,184 +1186,28 @@ type([U,Addr|SP],RP,IP,WP) ->
 	    next(SP,RP,IP,WP)
     end.
 
-space() ->
-    {0, <<"space">>, fun ffe:space/4 }.
+?XT("space", space).
 space(SP,RP,IP,WP) ->
     emit_char($\s),
     next(SP,RP,IP,WP).
 
-spaces() ->
-    {0, <<"spaces">>, fun ffe:spaces/4 }.
+?XT("spaces", spaces).
 spaces([U|SP],RP,IP,WP) ->
     emit_chars(lists:duplicate(U,$\s)),
     next(SP,RP,IP,WP).
 
-
-%% print stack value
-dot() ->
-    {0, <<".">>, fun ffe:dot/4 }.
-dot([Value|SP],RP,IP,WP) ->
-    emit_value(Value),
-    emit_char($\s),
-    next(SP,RP,IP,WP).
-
-%% print string
-%% ." String"
-%% compile: compile string literal that is printed at runtime
-dot_quote() ->
-    { ?IMMEDIATE, <<".\"">>, fun ffe:dot_quote/4 }.
-dot_quote(SP,RP,IP,WP) ->
-    compile_only(),
-    String = word($"),
-    comma_(fun ffe:lit/0),
-    comma_(String),
-    comma_(fun ffe:count/0),
-    comma_(fun ffe:type/0),
-    next(SP,RP,IP,WP).
-
 %% char
-care() ->
-    { 0, <<"char">>, fun ffe:care/4 }.
+?XT("char", care).
 care(SP,RP,IP,WP) ->
     Char = char(),
     next([Char|SP],RP,IP,WP).
 
-%% [char]
-bracket_care() ->
-    { ?IMMEDIATE, <<"[char]">>, fun ffe:bracket_care/4 }.
-bracket_care(SP,RP,IP,WP) ->
-    compile_only(),
-    Char = char(),
-    comma_(fun ffe:lit/0),
-    comma_(Char),
-    next(SP,RP,IP,WP).
-
 %% words manuplating stack only
-
-rot() ->
-    {0, <<"rot">>, fun ffe:rot/4}.
-rot(SP,RP,IP,WP) ->
-    ?rot(SP,RP,IP,WP,next).
 
 m_rot() ->
     {0, <<"-rot">>, fun ffe:m_rot/4}.
 m_rot(SP,RP,IP,WP) ->
     ?m_rot(SP,RP,IP,WP,next).
-
-plus() ->
-    { 0, <<"+">>, fun ffe:plus/4 }.
-plus(SP,RP,IP,WP) ->
-    ?plus(SP,RP,IP,WP, next).
-
-one_plus() ->
-    { 0, <<"1+">>, fun ffe:one_plus/4 }.
-oe_plus(SP,RP,IP,WP) ->
-    ?one_plus(SP,RP,IP,WP,next).
-
-two_plus() ->
-    { 0, <<"2+">>, fun ffe:two_plus/4 }.
-two_plus(SP,RP,IP,WP) ->
-    ?two_plus(SP,RP,IP,WP,next).
-
-minus() ->
-    { 0, <<"-">>, fun ffe:minus/4 }.
-minus(SP,RP,IP,WP) ->
-    ?minus(SP,RP,IP,WP,next).
-
-one_minus() ->
-    { 0, <<"1-">>, fun ffe:one_minus/4 }.
-one_minus(SP,RP,IP,WP) ->
-    ?one_minus(SP,RP,IP,WP,next).
-
-two_minus() ->
-    { 0, <<"2-">>, fun ffe:two_minus/4 }.
-two_minus(SP,RP,IP,WP) ->
-    ?two_minus(SP,RP,IP,WP,next).
-
-star() ->
-    { 0, <<"*">>, fun ffe:star/4 }.
-star(SP,RP,IP,WP) ->
-    ?star(SP,RP,IP,WP,next).
-
-slash() ->
-    { 0, <<"/">>, fun ffe:slash/4 }.
-slash(SP,RP,IP,WP) ->
-    ?slash(SP,RP,IP,WP,next).
-
-mod() ->
-    { 0, <<"mod">>, fun ffe:mod/4 }.
-mod(SP,RP,IP,WP) ->
-    ?mod(SP,RP,IP,WP,next).
-
-slash_mod() ->
-    { 0, <<"/mod">>, fun ffe:slash_mod/4 }.
-slash_mod(SP,RP,IP,WP) ->
-    ?slash_mod(SP,RP,IP,WP,next).
-
-negate() ->
-    { 0, <<"negate">>, fun ffe:negate/4 }.
-negate(SP,RP,IP,WP) ->
-    ?negate(SP,RP,IP,WP,next).
-
-over() ->
-    { 0, <<"over">>, fun ffe:over/4 }.
-over(SP,RP,IP,WP) ->
-    ?over(SP,RP,IP,WP,next).
-
-drop() ->
-    { 0, <<"drop">>, fun ffe:drop/4 }.
-drop(SP,RP,IP,WP) ->
-    ?drop(SP,RP,IP,WP,next).
-
-swap() ->
-    { 0, <<"swap">>, fun ffe:swap/4 }.
-swap(SP,RP,IP,WP) ->
-    ?swap(SP,RP,IP,WP,next).
-
-dup() ->
-    { 0, <<"dup">>, fun ffe:dup/4 }.
-dup(SP,RP,IP,WP) ->
-    ?dup(SP,RP,IP,WP,next).
-
-abs() ->
-    { 0, <<"abs">>, fun ffe:abs/4 }.
-abs(SP,RP,IP,WP) ->
-    ?abs(SP,RP,IP,WP,next).
-
-lshift() ->
-    { 0, <<"lshift">>, fun ffe:lshift/4 }.
-lshift(SP,RP,IP,WP) ->
-    ?lshift(SP,RP,IP,WP,next).
-
-rshift() ->
-    { 0, <<"rshift">>, fun ffe:rshift/4 }.
-rshift(SP,RP,IP,WP) ->
-    ?rshift(SP,RP,IP,WP,next).
-
-arshift() ->
-    { 0, <<"arshift">>, fun ffe:arshift/4 }.
-arshift(SP,RP,IP,WP) ->
-    ?arshift(SP,RP,IP,WP,next).
-
-'and'() ->
-    { 0, <<"and">>, fun ffe:'and'/4 }.
-'and'(SP,RP,IP,WP) ->
-    ?'and'(SP,RP,IP,WP,next).
-
-'or'() ->
-    { 0, <<"or">>, fun ffe:'or'/4 }.
-'or'(SP,RP,IP,WP) ->
-    ?'or'(SP,RP,IP,WP,next).
-
-invert() ->
-    { 0, <<"invert">>, fun ffe:invert/4 }.
-invert(SP,RP,IP,WP) ->
-    ?invert(SP,RP,IP,WP,next).
-
-'xor'() ->
-    { 0, <<"xor">>, fun ffe:'xor'/4 }.
-'xor'(SP,RP,IP,WP) ->
-    ?'xor'(SP,RP,IP,WP,next).
 
 spat() ->
     { 0, <<"sp@">>, fun ffe:spat/4 }.
@@ -1504,34 +1229,14 @@ rpstore() ->
 rpstore(SP,_RP,IP,WP) ->
     ?rpstore(SP,_RP,IP,WP,next).
 
-min() ->
-    { 0, <<"min">>, fun ffe:min/4 }.
-min(SP,RP,IP,WP) ->
-    ?min(SP,RP,IP,WP,next).
-
-max() ->
-    { 0, <<"max">>, fun ffe:max/4 }.
-max(SP,RP,IP,WP) ->
-    ?max(SP,RP,IP,WP,next).
-
-zero_equals() ->
-    { 0, <<"0=">>, fun ffe:zero_equals/4 }.
-zero_equals(SP,RP,IP,WP) ->
-    ?zero_equals(SP,RP,IP,WP,next).
-
-zero_less() ->
-    { 0, <<"0<">>, fun ffe:zero_less/4 }.
-zero_less(SP,RP,IP,WP) ->
-    ?zero_less(SP,RP,IP,WP,next).
-
 zero() ->
     { 0, <<"0">>, fun ffe:docon/4, 0 }.
 
 one() ->
-    { 0, <<"0">>, fun ffe:docon/4, 1 }.
+    { 0, <<"1">>, fun ffe:docon/4, 1 }.
 
 minus_one() ->
-    { 0, <<"0">>, fun ffe:docon/4, -1 }.
+    { 0, <<"-1">>, fun ffe:docon/4, -1 }.
 
 %% IMMEDIATE
 backslash() ->
@@ -1546,18 +1251,6 @@ paren(SP,RP,IP,WP) ->
     word($)),       %% skip until ')'
     next(SP,RP,IP,WP).
 
-right_bracket() ->
-    { ?IMMEDIATE, <<"]">>, fun ffe:right_bracket/4 }. 
-right_bracket(SP,RP,IP,WP) ->
-    enter_compile(),
-    next(SP,RP,IP,WP).
-
-left_bracket() ->
-    { ?IMMEDIATE, <<"[">>, fun ffe:left_bracket/4 }. 
-left_bracket(SP,RP,IP,WP) ->
-    leave_compile(),
-    next(SP,RP,IP,WP).
-
 string() ->
     { ?IMMEDIATE, <<"\"">>, fun ffe:string/4 }.
 string(SP,RP,IP,WP) ->
@@ -1570,15 +1263,6 @@ string(SP,RP,IP,WP) ->
 	false ->
 	    next([String|SP],RP,IP,WP)
     end.
-
-emit_stack() ->
-    { 0, <<".s">>, fun ffe:emit_stack/4 }.
-emit_stack(SP, RP, IP, WP) ->
-    lists:foreach(fun(Value) ->
-			  emit_value(Value),
-			  emit_char($\s)
-		  end, lists:reverse(SP)),
-    next(SP, RP, IP, WP).
 
 emit_value(Value) ->
     emit_value(altout(), Value).
@@ -1595,28 +1279,9 @@ emit_value(Fd, Value) ->
 	    emit_string(Fd,lists:flatten(io_lib:format("~p",[Value])))
     end.    
 
-emit_words() ->
-    { 0, <<"words">>, fun ffe:emit_words/4 }.
-emit_words(SP, RP, IP, WP) ->
-    emit_dicts([current() | forth()]),
-    next(SP, RP, IP, WP).
-
-emit_dicts([Dict|Ds]) ->
-    emit_dict(Dict),
-    emit_dicts(Ds);
-emit_dicts([]) ->
-    ok.
-
-emit_dict(Dict) ->
-    maps:fold(
-      fun(Name, _Xt, _Acc) ->
-	      emit_string(Name),
-	      emit_char($\s)
-      end, [], Dict).
 
 %% output a word as erlang code - fixme only allow colon defs!
-show_word() ->
-    { 0, <<"show">>, fun ffe:show_word/4 }.
+?XT("show", show_word).
 show_word(SP,RP,IP,WP) ->
     Name = word($\s),
     case find_word_(Name) of
@@ -1628,8 +1293,7 @@ show_word(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 %% unthread a word
-unthread_word() ->
-    { 0, <<"unthread">>, fun ffe:unthread_word/4 }.
+?XT("unthread", unthread_word).
 unthread_word(SP,RP,IP,WP) ->
     Name = word($\s),
     case find_word_(Name) of
@@ -1643,8 +1307,7 @@ unthread_word(SP,RP,IP,WP) ->
 %% Remove word from current dictionary
 %% Remember that words that refer to this word will 
 %% continue to work in interactive mode but will not compile!
-remove_word() ->
-    { 0, <<"remove">>, fun ffe:remove_word/4 }.
+?XT("remove", remove_word).
 remove_word(SP,RP,IP,WP) ->
     Name = word($\s),
     Current = maps:remove(Name, current()),
@@ -1673,13 +1336,16 @@ interpreting() ->
 	_ -> throw({-29, compiler_nesting})
     end.
 
+-include("core.i").
+-include("core_ext.i").
+-include("common.i").
+%%-include("search.i").
+-include("tools.i").
+%%-include("tools_ext.i").
+
 -ifdef(INCLUDE_STRAP).
 -include("strap.i").
 -else.
 strap_words() ->
     #{}.
 -endif.
-
-
-
-

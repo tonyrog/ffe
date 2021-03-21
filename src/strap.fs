@@ -51,9 +51,9 @@
 \ core ext
 : nip ( x1 x2 -- x2 ) swap drop ;
 
-32 #CONSTANT space
+32 constant space
 
 \ +- : (n1 n2 --- n3)
 \ Apply the sign of n2 to n1, which is left in n3
 \
-: +- 0< #IF negate #THEN ;
+: +- 0< if negate then ;
