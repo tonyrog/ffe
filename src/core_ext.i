@@ -32,7 +32,7 @@ two_rfetch(SP,RP0=[B,A|_],IP,WP) ->
 colon_noname(SP,RP,IP,WP) ->
     interpreting(),
     cf_reset(),
-    set_state(?COMPILE),
+    set_state(?COMPILE bor ?NONAME),
     here({0,"",fun ffe:docol/4}),
     next(SP, RP, IP, WP).
 

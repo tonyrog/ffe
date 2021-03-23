@@ -29,6 +29,16 @@
 
 -define(FIXME(), erlang:display_string("FIXME\n")).
 
+-define(BELL,  $\^g).
+-define(TAB,   $\t).
+-define(CR,    $\r).
+-define(NL,    $\n).
+-define(CRNL,  $\r,$\n).
+-define(TILDE, $~).
+-define(SPACE, $\s).
+-define(ESCAPE, $\e).
+-define(BS, $\b).
+
 -define(next(SP,RP,IP,WP),
 	ffe:next(SP,RP,IP,WP)).
 

@@ -20,6 +20,7 @@
 	 tib = <<>>,  %% text input buffer
 	 width = 0,   %% max width of word (fix me not used)
 	 dp = {},     %% data pointer (fixme)
+	 termio,
 	 altin = standard_io,
 	 altout = standard_io,
 	 in = 0,
@@ -37,15 +38,14 @@
 		 ],
 	 current = #{},    %% user defined words
 	 var = #{},        %% variables Ref => Value
-	 base = 10,
+	 base = 10,        %% current base
 	 dpl = 0,
-	 csp = [],
+	 csp = [],         %% control stack
+	 hsp = [],         %% hold area, stack!
 	 span = 0,
 	 hld = 0,
-	 latest = <<>>,
-	 testu = 0
+	 latest = <<>>
 	}).
-
 
 %% State flags
 -define(COMPILE,  16#01).
@@ -54,6 +54,9 @@
 %% dictionary word status
 -define(SMUDGE,      16#40).
 -define(IMMEDIATE,   16#80).
+%% maybe a ICASE flags? 
+%% lookup WoRd, fail lookup to_lower(word) if found and ?ICASE then ok!
+-define(ICASE,       16#20).
 
 -define(CF_ORIG, 1).
 -define(CF_DEST, 2).
@@ -93,6 +96,9 @@
 -define(set_nf(W, Name), setelement(2, (W), (Name))).
 -define(set_cf(W, Code), setelement(3, (W), (Code))).
 -define(set_pf(I,W,Param), setelement(3+(I), (W), (Param))).
+
+-define(name_len(Addr), byte_size((Addr))).
+
 
 -include("ffe.hrl").
 
@@ -286,7 +292,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 			    show_words_(Fd, 4, Unthread-1, Def);
 		       true ->
 			    Name = ?nf(Def),
-			    emit_char(Fd, $\s),
+			    emit_char(Fd, ?SPACE),
 			    emit_string(Fd, ModStr),
 			    emit_string(Fd, Name)
 		    end;
@@ -294,7 +300,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 		    ok;
 		_ ->
 		    Name = ?nf(Def),
-		    emit_char(Fd, $\s),
+		    emit_char(Fd, ?SPACE),
 		    emit_string(Fd, ModStr),
 		    emit_string(Fd, Name)		    
 	    end;
@@ -306,12 +312,13 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 	    emit_string(Fd, integer_to_list(Arity))
     end;
 show_word_(Fd, _Unthread, W) ->
-    emit_char(Fd, $\s),
+    emit_char(Fd, ?SPACE),
     emit_value(Fd, W).
 
 %% setup test environment
 init() ->
-    put(user, #user {}),
+    Port = ffe_io:open(),
+    put(user, #user { termio = Port, altin = Port, altout = Port }),
     ok.
 
 get_user(Field) ->
@@ -334,8 +341,8 @@ span(Size) when is_integer(Size),Size>=0 -> set_user(#user.span,Size).
 in() -> get_user(#user.in).
 in(Offset) when is_integer(Offset),Offset>=0 -> set_user(#user.in, Offset).
 
-out() -> get_user(#user.out).
-out(N) when is_integer(N),N>=0 -> set_user(#user.out, N).
+get_out() -> get_user(#user.out).
+set_out(N) when is_integer(N),N>=0 -> set_user(#user.out, N).
 
 %% source is tib in> @
 source() -> {tib(),in()}.
@@ -343,31 +350,72 @@ source(Data,Offset) -> tib(Data),in(Offset),span(byte_size(Data)).
 
 altin() -> get_user(#user.altin).
 altout() -> get_user(#user.altout).
+termio() -> get_user(#user.termio).
 
 get_base() -> get_user(#user.base).
 set_base(Base) when is_integer(Base), Base > 1, Base =< 36 ->
     set_user(#user.base, Base).
 
 %% csp is a list of value (stack) in this implementation
-csp() -> get_user(#user.csp).    
-csp(Stack) -> set_user(#user.csp,Stack).
+get_csp() -> get_user(#user.csp).
+set_csp(Stack) -> set_user(#user.csp,Stack).
 
-cf_push(Tag) ->  csp([Tag|csp()]).
+cf_push(Tag) ->  set_csp([Tag|get_csp()]).
 
 cf_pop() ->
-    case csp() of
+    case get_csp() of
 	[] -> throw({-22, control_structure});
 	[Tag|Stack1] ->
-	    csp(Stack1),
+	    set_csp(Stack1),
 	    Tag
     end.
 
-cf_top() -> hd(csp()).
-cf_reset() -> csp([]).
+cf_top() -> hd(get_csp()).
+cf_reset() -> set_csp([]).
+
+get_hsp() ->
+    get_user(#user.hsp).
+set_hsp(Stack) ->
+    set_user(#user.hsp,Stack).
+
+%% push a new char list onto hold "stack"
+hold_begin() ->
+    set_hsp([[]|get_hsp()]).
+
+%% pop char list from hold stack and make binary
+hold_end() ->
+    [Hold | Stack] = get_hsp(),
+    set_hsp(Stack),
+    list_to_binary(Hold).
+
+hold_char(Char) ->
+    [Hold | Stack] = get_hsp(),
+    set_hsp([[Char|Hold]|Stack]).
+
+hold_number(0) ->
+    hold_char($0);
+hold_number(N) ->
+    hold_digits(-1,N).
+
+%% format M digits from unsigned value N in base B
+%% if M<0 then format all digits until N=0
+%%    M=0 stop format
+%%    M>0 format more digits
+hold_digits(M,N) ->
+    hold_digits(M,N,get_base()).
+
+hold_digits(0,N,_B) ->
+    N;
+hold_digits(M,0,_B) when M < 0 ->
+    0;
+hold_digits(M,N,B) ->
+    Digit = N rem B,
+    Char = if Digit < 10 -> Digit+$0; true -> (Digit-10)+$A end,
+    hold_char(Char),
+    hold_digits(M-1,N div B,B).
 
 here() -> get_user(#user.dp).
 here(Data) when is_tuple(Data) -> 
-    %% io:format("set here = ~p\n", [Data]),
     set_user(#user.dp, Data).
 
 here_() ->  %% get number of compiled words so far
@@ -389,7 +437,6 @@ set_value(Var, Value) ->
 
 %% Add Name to current vocabulary
 define(Name,W) ->
-    %% io:format("define ~s = ~p = ~p\n", [Name, W, W()]),
     current(maps:put(Name,W,current())).
 
 %% FIRST VERSION in Erlang - to validate the idea
@@ -401,11 +448,10 @@ quit0() ->
 
 main(SP) ->
     Compile = is_compiling(),
-    case word($\s) of
+    case word(?SPACE) of
 	eof ->
 	    SP;
 	Name ->
-	    %% io:format("main: ~s, compile = ~w\n", [Name,Compile]),
 	    case find_word_(Name) of
 		{false,Xt} when Compile -> comma_(Xt), main(SP);
 		{_, Xt} -> exec(Xt(), SP);
@@ -472,23 +518,23 @@ exec(W, SP) ->
 	    CallStack = ?GET_STACK(_StackTrace),
 	    Calls = string:join(callstack(CallStack), " "),
 	    %% fixme: print forth word where error occured 
-	    io:format("Stack empty\n", []),
-	    io:format("  call: ~p\n", [Calls]),
+	    io:format("Stack empty\r\n", []),
+	    io:format("  call: ~p\r\n", [Calls]),
 	    io:format("  call stack: ~p\n", [CallStack]),
 	    quit0();
 	?EXCEPTION(error,function_clause,_StackTrace) ->
 	    CallStack = ?GET_STACK(_StackTrace),
 	    Calls = string:join(callstack(CallStack), " "),
 	    %% fixme: print forth word where error occured 
-	    io:format("Stack empty\n", []),
-	    io:format("  call: ~p\n", [Calls]),
-	    io:format("  call stack: ~p\n", [CallStack]),
+	    io:format("Stack empty\r\n", []),
+	    io:format("  call: ~p\r\n", [Calls]),
+	    io:format("  call stack: ~p\r\n", [CallStack]),
 	    quit0();
 
 	?EXCEPTION(error,Reason,_StackTrace) ->
 	    CallStack = ?GET_STACK(_StackTrace),
-	    io:format("Internal error: ~p\n", [Reason]),
-	    io:format("  call stack: ~p\n", [CallStack]),	    
+	    io:format("Internal error: ~p\r\n", [Reason]),
+	    io:format("  call stack: ~p\r\n", [CallStack]),	    
 	    quit0()
     end.
 
@@ -498,10 +544,6 @@ callstack([_ | _Stack]) ->
     ["..."];
 callstack([]) ->
     [].
-
-
-tick_(Name) ->
-    find_word_(Name).
 
 %%
 %% Find a word:
@@ -591,22 +633,84 @@ char() ->
 	    Char
     end.
 
+expand(RevLine) ->
+    %% match dictionary and collect all prefix matches
+    Match = collect_until(RevLine, ?SPACE, []),
+    case match_dicts(Match, [current() | forth()], []) of
+	[] ->
+	    {no, <<"">>, []};
+	[OneMatch] -> 
+	    Insert = remove_prefix(OneMatch, Match),
+	    {yes, <<Insert/binary,?SPACE>>, []};
+	MultipleMatches=[FirstMatch|RestOfMatches] ->
+	    CommonMatch =
+		lists:foldl(
+		  fun(String, Prefix) ->
+			  common_prefix(Prefix, String)
+		  end, FirstMatch, RestOfMatches),
+	    Insert = remove_prefix(CommonMatch, Match),
+	    {yes, Insert, MultipleMatches}
+    end.
+	    
+match_dicts(Match, [Dict|Ds], Acc) ->    
+    Acc1 = match_dict(Match, Dict, Acc),
+    match_dicts(Match, Ds, Acc1);
+match_dicts(_Match, [], Acc) -> 
+    Acc.
+
+match_dict(Match, Dict, Acc0) ->
+    MatchLen = ?name_len(Match),
+    maps:fold(
+      fun(Name, _Xt, Acc) ->
+	      case Name of
+		  <<Match:MatchLen/binary, _/binary>> ->
+		      [Name|Acc];
+		  _ ->
+		      Acc
+	      end
+      end, Acc0, Dict).
+
+remove_prefix(String, Prefix) ->
+    PrefixLen = ?name_len(Prefix),
+    case String of
+	<<Prefix:PrefixLen/binary, String1/binary>> ->
+	    String1
+    end.
+
+%% extract common prefix (utf8?)
+common_prefix(String1, String2) ->
+    common_prefix(String1, String2, []).
+
+common_prefix(<<C,Cs/binary>>, <<C,Ds/binary>>, Acc) ->
+    common_prefix(Cs,Ds,[C|Acc]);
+common_prefix(_Cs,_Ds,Acc) -> 
+    list_to_binary(lists:reverse(Acc)).
+
+%% collect input chars until C is matched
+collect_until([C|_Cs], C, Acc) ->
+    list_to_binary(Acc);  %% utf8?
+collect_until([], _C, Acc) ->
+    list_to_binary(Acc);  %% utf8
+collect_until([C|Cs], Char, Acc) ->
+    collect_until(Cs, Char, [C|Acc]).
+
 %% read a line and put it in TIB 
 refill() ->
     ALTIN = altin(),
     ALTOUT = altout(),
+    Terminal = termio(),
     case is_compiling() of
-	false when ALTIN =:= standard_io, ALTOUT =:= standard_io ->
-	    emit_string("ok ");
+	false when ALTIN =:= Terminal, ALTOUT =:= Terminal ->
+	    emit_string(ALTOUT, " ok\r\n");
 	_ ->
 	    ok
     end,
-    case io:get_line(ALTIN, '') of
+    case get_line(ALTIN, ALTOUT) of
 	eof ->
 	    source(<<>>,0),
 	    eof;
 	Data ->
-	    out(0), %%? ok?
+	    set_out(0), %%? ok?
 	    Data1 = erlang:iolist_to_binary(Data),
 	    Sz1 = byte_size(Data1)-1,
 	    %% strip newline
@@ -616,37 +720,224 @@ refill() ->
 	    end
     end.
 
+-define(CTRL_A, $\^a).  %% beginning of line
+-define(CTRL_B, $\^b).  %% backward char
+-define(CTRL_E, $\^e).  %% end of line
+-define(CTRL_F, $\^f).  %% forward char
+-define(CTRL_K, $\^k).  %% kill (cut) until end of line
+-define(CTRL_P, $\^p).  %% previous line
+-define(CTRL_Y, $\^y).  %% yank(insert) from kill buffer
+-define(BACKSPACE, 127).
+
+%% {esc,$b} - backward word
+%% {esc,$f} - forward word
+
+get_line(In, Out) ->
+    get_line(In, Out, [], []).
+
+get_line(In, Out, After, Before) ->
+    case ffe_io:input(In) of
+	eof -> eof;
+	?CR ->
+	    ffe_io:output(Out, [?SPACE]),
+	    lists:reverse(Before) ++ After;
+	?TAB ->
+	    {Silent,Insert,Expand} = expand(Before),
+	    if Silent =:= yes -> ok;
+	       Silent =:= no -> ffe_io:beep(Out)
+	    end,
+	    format_word_list(Out, Expand),
+	    Before1 = lists:reverse(binary_to_list(Insert),Before),
+	    if Expand =:= [], Insert =/= [] ->
+		    ffe_io:insert(Out, Insert);
+	       Expand =/= [] ->
+		    ffe_io:insert(Out, lists:reverse(Before1));
+	       true ->
+		    ok
+	    end,
+	    get_line(In, Out, After, Before1);
+	?BS ->
+	    get_line_bs(In, Out, After, Before);
+	?BACKSPACE ->
+	    get_line_bs(In, Out, After, Before);
+	?CTRL_B ->
+	    get_line_backward_char(In, Out, After, Before);
+	left ->
+	    get_line_backward_char(In, Out, After, Before);
+	?CTRL_F ->
+	    get_line_forward_char(In, Out, After, Before);
+	right ->
+	    get_line_forward_char(In, Out, After, Before);
+	?CTRL_E ->
+	    get_line_end_of_line(In, Out, After, Before);
+	?CTRL_A ->
+	    get_line_beginning_of_line(In, Out, After, Before);
+	?CTRL_K ->
+	    get_line_kill_to_end_of_line(In, Out, After, Before);
+	?CTRL_Y ->
+	    get_line_insert_from_kill_buffer(In, Out, After, Before);
+	Key when Key >= ?SPACE, Key =< $~ ->
+	    ffe_io:output(Out, [Key]),
+	    get_line(In, Out, After, [Key|Before]);
+	Key ->
+	    ffe_io:beep(Out),
+	    io:format("char ~p\n", [Key]),
+	    get_line(In, Out, After, Before)
+    end.
+
+
+get_line_backward_char(In, Out, After, Before) ->
+    case Before of
+	[] ->
+	    ffe_io:beep(Out), %% option?
+	    get_line(In, Out, After, Before);
+	[Char|Before1] ->
+	    ffe_io:move(Out, -1),
+	    get_line(In, Out, [Char|After], Before1)
+    end.
+
+get_line_forward_char(In, Out, After, Before) ->
+    case After of
+	[Char|After1] ->
+	    ffe_io:move(Out, 1),
+	    get_line(In, Out, After1, [Char|Before]);
+	[] ->
+	    ffe_io:beep(Out), %% option?
+	    get_line(In, Out, After, Before)
+    end.
+
+get_line_end_of_line(In, Out, After, Before) ->
+    case After of
+	[] ->
+	    ffe_io:beep(Out),
+	    get_line(In, Out, After, Before);
+	_ ->
+	    ffe_io:move(Out, length(After)),
+	    get_line(In, Out, [], lists:reverse(After,Before))
+    end.
+    
+get_line_beginning_of_line(In, Out, After, Before) ->
+    case Before of
+	[] ->
+	    ffe_io:beep(Out),
+	    get_line(In, Out, After, Before);
+	_ ->
+	    ffe_io:move(Out, -length(Before)),
+	    get_line(In, Out, lists:reverse(Before,After), [])
+    end.
+    
+get_line_bs(In, Out, After, Before) ->
+    case Before of
+	[_|Before1] ->
+	    ffe_io:delete(Out, -1),
+	    get_line(In, Out, After, Before1);
+	[] ->
+	    ffe_io:beep(Out),
+	    get_line(In, Out, After, Before)
+    end.
+
+get_line_kill_to_end_of_line(In, Out, After, Before) ->
+    case After of
+	[] ->
+	    put(kill_buffer, []),
+	    get_line(In, Out, After, Before);
+	_ ->
+	    ffe_io:delete(Out, length(After)),
+	    put(kill_buffer, After),
+	    get_line(In, Out, [], Before)
+    end.
+
+get_line_insert_from_kill_buffer(In, Out, After, Before) ->
+    case get(kill_buffer) of
+	[] ->
+	    get_line(In, Out, After, Before);
+	Yank ->
+	    ffe_io:insert(Out, Yank),
+	    get_line(In, Out, After, lists:reverse(Yank, Before))
+    end.
+
+%% FIXME use "real" output routine
+format_word_list(_Out, []) ->
+    ok;
+format_word_list(Out, WordNameList) ->
+    emit_chars(Out, [?CRNL]),
+    Width = lists:max([?name_len(WordName) || WordName <- WordNameList])+1,
+    format_lines(Out, WordNameList, 76, 76, Width).
+
+format_lines(Out, [Word|WordNameList], LineLength, Remain, Width) ->
+    if Remain < 0; Remain - Width < 0 ->
+	    emit_chars(Out, [?CRNL]),
+	    N = emit_counted_string(Out, Word, Width),
+	    format_lines(Out, WordNameList, LineLength, LineLength-N, Width);
+       true ->
+	    N = emit_counted_string(Out, Word, Width),
+	    format_lines(Out, WordNameList, LineLength, Remain-N, Width)
+    end;
+format_lines(Out, [], LineLength, Remain, _Width) ->
+    if LineLength =/= Remain ->
+	    emit_chars(Out, [?CRNL]);
+       true ->
+	    ok
+    end.
+
+emit_counted_string(Fd, WordName, Width) ->
+    N = ?name_len(WordName),
+    if N < Width ->
+	    ffe_io:output(Fd, WordName),
+	    ffe_io:output(Fd, lists:duplicate(Width-N,?SPACE)),
+	    set_out(get_out()+Width),
+	    Width;
+       true ->
+	    ffe_io:output(Fd, WordName),
+	    set_out(get_out()+N),
+	    N
+    end.
+
+    
 emit_char(Char) ->
     emit_char(altout(), Char).
 
 emit_char(Fd, Char) ->
-    if Char =:= $\n ->
-	    io:put_chars(Fd,[$\n]),
-	    out(0);
+    if Char =:= $\r ->
+	    ffe_io:output(Fd,[$\r]),
+	    set_out(0);
+       Char =:= $\n ->
+	    ffe_io:output(Fd,[$\n]);
        true ->
-	    io:put_chars(Fd,[Char]),
-	    out(out()+1)
+	    ffe_io:output(Fd,[Char]),
+	    set_out(get_out()+1)
     end.
 
-emit_chars(Binary) when is_binary(Binary) ->
-    emit_chars_(altout(), byte_size(Binary), binary_to_list(Binary));
 emit_chars(Chars) ->
-    emit_chars_(altout(), length(Chars), Chars).
+    emit_chars(altout(), Chars).
 
-emit_chars(Fd, Len, Binary) when is_binary(Binary) ->
-    emit_chars_(Fd, Len, binary_to_list(Binary));
-emit_chars(Fd, Len, Chars) when is_list(Chars) ->
-    emit_chars_(Fd, Len, Chars).
+emit_chars(Fd, Binary) when is_binary(Binary) ->
+    emit_chars_(Fd, binary_to_list(Binary));
+emit_chars(Fd, Chars) when is_list(Chars) ->
+    emit_chars_(Fd, Chars).
 
-emit_chars_(Fd, Len, Chars) ->
-    io:put_chars(Fd, Chars),
-    out(out()+Len).
+emit_chars_(_Fd, []) ->
+    ok;
+emit_chars_(Fd, [C|Cs]) ->
+    emit_char(Fd, C),
+    emit_chars_(Fd, Cs).
 
-emit_string(Binary) when is_binary(Binary) ->
-    emit_string_(altout(), binary_to_list(Binary));
-emit_string(Chars) when is_list(Chars) ->
-    emit_string_(altout(), Chars).
+emit_nchars(N, Chars) ->
+    emit_chars(altout(), N, Chars).
 
+emit_chars(Fd, N, Binary) when is_binary(Binary) ->
+    emit_nchars_(Fd, N, binary_to_list(Binary));
+emit_chars(Fd, N, CharList) when is_list(CharList) ->
+    emit_nchars_(Fd, N, CharList).
+
+emit_nchars_(_Fd, _N, []) ->  ok;
+emit_nchars_(_Fd, 0, _Cs) ->   ok;
+emit_nchars_(Fd, N, [C|Cs]) ->
+    emit_char(Fd, C),
+    emit_nchars_(Fd, N-1, Cs).
+
+emit_string(String) ->
+    emit_string(altout(), String).
 emit_string(Fd, Binary) when is_binary(Binary) ->
     emit_string_(Fd, binary_to_list(Binary));
 emit_string(Fd,Chars) when is_list(Chars) ->
@@ -656,12 +947,14 @@ emit_string_(_Fd, []) ->
     ok;
 emit_string_(Fd, Cs) ->
     case collect_line(Cs, 0, []) of
-	{true,Len,Chars,Cs1} ->
-	    emit_chars_(Fd,Len,Chars),
-	    emit_char(Fd,$\n),
+	{true,_Len,Chars,Cs1} ->
+	    ffe_io:output(Fd, Chars),
+	    ffe_io:output(Fd, [?CR,?NL]),
+	    set_out(0),
 	    emit_string_(Fd, Cs1);
 	{false,Len,Chars,Cs1} ->
-	    emit_chars_(Fd,Len,Chars),
+	    ffe_io:output(Fd, Chars),
+	    set_out(get_out()+Len),
 	    emit_string_(Fd, Cs1)
     end.
 
@@ -686,7 +979,7 @@ enclose(Ch,Data,DoDrop) ->
 
 %% match characters
 match(C, C) -> true;
-match($\s, $\t) -> true;
+match(?SPACE, ?TAB) -> true;
 match(_, _) ->  false.
 
 drop(Ch, Data, Offs) ->
@@ -745,7 +1038,6 @@ internal_words() ->
       ?WORD("(loop)",     ploop),
       ?WORD("noop", noop),
       ?WORD("base", base),
-      ?WORD("testu", testu),  %% TESTING!!! user area
       
       ?WORD("sp@",        spat),
       ?WORD("rp@",        rpat),
@@ -849,7 +1141,7 @@ smudge(SP, RP, IP, WP) ->
 %% CONSTANT
 ?XT("constant", compile_constant).
 compile_constant([Value|SP],RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     Def = {0, Name, fun ?MODULE:docon/4, Value }, 
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
@@ -857,7 +1149,7 @@ compile_constant([Value|SP],RP,IP,WP) ->
 %% VARIABLE
 ?XT("variable", compile_variable).
 compile_variable(SP,RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     Var = make_variable_ref(),
     Def = {0, Name, fun ?MODULE:dovar/4, Var },
     define(Name, fun() -> Def end),
@@ -866,7 +1158,7 @@ compile_variable(SP,RP,IP,WP) ->
 %% VALUE
 ?XT("value", compile_value).
 compile_value([Value|SP],RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     Var = make_variable_ref(),
     set_value(Var, Value),
     Def = {0, Name, fun ?MODULE:doval/4, Var },
@@ -879,7 +1171,7 @@ make_variable_ref() ->
 compile_user() ->
     { 0, <<"user">>, fun ?MODULE:compile_user/4 }.
 compile_user([Value|SP],RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     Def = {0, Name, fun ?MODULE:dousr/4, Value },
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
@@ -979,8 +1271,7 @@ compile_else(SP,RP,IP,WP) ->
 
 ?XT("create", create).
 create(SP,RP,IP,WP) ->
-    Name = word($\s),
-    %% io:format("create word ~s\n", [Name]),
+    Name = word(?SPACE),
     Does0 = {0,Name,fun ?MODULE:does0/4, 0},
     here(Does0),
     cf_push(?CF_CREATE),
@@ -988,7 +1279,7 @@ create(SP,RP,IP,WP) ->
 
 ?XT("does>", does).
 does(SP,RP,IP,WP) ->
-    case csp() of
+    case get_csp() of
 	[?CF_CREATE|Csp] -> %% only in create?
 	    Def0 = here(),
 	    Name = ?nf(Def0),
@@ -999,7 +1290,7 @@ does(SP,RP,IP,WP) ->
 	    Def2 = ?set_pf(1,Def1,?WPTR(DoesPos,DoesXt)),
 	    define(Name, fun() -> Def2 end),
 	    here({}),  %% clear defintion area
-	    csp(Csp),  %% pop control stack
+	    set_csp(Csp),  %% pop control stack
 	    [IP1|RP1] = RP,
 	    next(SP,RP1,IP1,WP)
     end.
@@ -1035,13 +1326,9 @@ j(SP,[_,_,Jx|_]=RP,IP,Code) ->
 base(SP,RP,IP,Code) ->
     next([{user,#user.base}|SP],RP,IP,Code).
 
-?XT("textu", testu).
-testu(SP,RP,IP,Code) ->
-    next([{user,#user.testu}|SP],RP,IP,Code).
-
 ?XT("to", to).
 to([Value|SP],RP,IP,Code) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
 	    Var = element(4, Xt()),
@@ -1101,7 +1388,6 @@ docol(SP,RP,IP,WP) ->
 docon() ->
     { 0, <<"(docon)">>, fun ffe:docon/4 }.
 docon(SP,RP,IP,WP0=?WPTR(W,WP)) ->
-    %% io:format("do con WP0 = ~w\n", [WP0]),
     next([element(W,WP)|SP],RP,IP,WP0).
 
 dousr() ->
@@ -1127,7 +1413,6 @@ does0(SP,RP,?WPTR(IP,Code),WP=?WPTR(Pos,Wf)) ->
 does1() ->
     { 0, <<"(does>)">>, fun ?MODULE:does1/4 }.
 does1(SP,RP,IP,WP=?WPTR(Pos,Wft)) ->
-    %% io:format("WP = ~w\n", [WP]),
     ?WPTR(XPos,Xt) = element(Pos, Wft),
     next([?WPTR(Pos+1,Wft)|SP],[IP|RP],?WPTR(XPos,Xt()),WP).
 
@@ -1136,13 +1421,13 @@ semis() ->
 semis(SP,[IP|RP],_IP,WP) ->
     %% special treat when reach ';' while doing create and 
     %% does> is not found
-    case csp() of
+    case get_csp() of
 	[?CF_CREATE|Csp] ->
 	    Def = here(),
 	    Name = element(2, Def),
 	    define(Name, fun() -> Def end),
 	    here({}),  %% clear defintion area
-	    csp(Csp),  %% pop control stack
+	    set_csp(Csp),  %% pop control stack
 	    %% set_state(0),
 	    next(SP,RP,IP,WP);
 	_ ->
@@ -1162,70 +1447,29 @@ zbranch([0|SP],RP,?WPTR(IP,Code),WP) ->
 zbranch([_|SP],RP,{IP,Code},WP) ->
     next(SP,RP,?WPTR(IP+1,Code),WP).
 
-cr() ->
-    {0, <<"cr">>, fun ffe:cr/4 }.
-cr(SP,RP,IP,WP) ->
-    emit_char($\n),
-    next(SP,RP,IP,WP).
-
-count() ->
-    {0, <<"count">>, fun ffe:count/4 }.
-count(SP=[Addr|_],RP,IP,WP) ->
-    if is_binary(Addr) ->
-	    next([byte_size(Addr)|SP],RP,IP,WP);
-       true ->
-	    next([0|SP],RP,IP,WP)
-    end.
-
-?XT("type", type).
-type([U,Addr|SP],RP,IP,WP) ->
-    if is_binary(Addr) ->
-	    emit_chars(altout(), U, Addr),
-	    next(SP,RP,IP,WP);
-       true ->
-	    next(SP,RP,IP,WP)
-    end.
-
-?XT("space", space).
-space(SP,RP,IP,WP) ->
-    emit_char($\s),
-    next(SP,RP,IP,WP).
-
-?XT("spaces", spaces).
-spaces([U|SP],RP,IP,WP) ->
-    emit_chars(lists:duplicate(U,$\s)),
-    next(SP,RP,IP,WP).
-
 %% char
 ?XT("char", care).
 care(SP,RP,IP,WP) ->
     Char = char(),
     next([Char|SP],RP,IP,WP).
 
-%% words manuplating stack only
-
-m_rot() ->
-    {0, <<"-rot">>, fun ffe:m_rot/4}.
+?XT("-rot", m_rot).
 m_rot(SP,RP,IP,WP) ->
     ?m_rot(SP,RP,IP,WP,next).
 
-spat() ->
-    { 0, <<"sp@">>, fun ffe:spat/4 }.
+?XT("sp@", spat).
 spat(SP,RP,IP,WP) ->
     ?spat(SP,RP,IP,WP,next).
 
-rpat() ->
-    { 0, <<"rp@">>, fun ffe:rpat/4 }.
+?XT("rp@", rpat).
 rpat(SP,RP,IP,WP) ->
     ?rpat(SP,RP,IP,WP,next).
 
-spstore() ->
-    { 0, <<"sp!">>, fun ffe:spstore/4 }.
+?XT("sp!", spstore).
 spstore(SP,RP,IP,WP) ->
     ?spstore(SP,RP,IP,WP,next).
 
-rpstore() ->
-    { 0, <<"rp!">>, fun ffe:rpstore/4 }.
+?XT("rp!", rpstore).
 rpstore(SP,_RP,IP,WP) ->
     ?rpstore(SP,_RP,IP,WP,next).
 
@@ -1238,21 +1482,17 @@ one() ->
 minus_one() ->
     { 0, <<"-1">>, fun ffe:docon/4, -1 }.
 
-%% IMMEDIATE
-backslash() ->
-    { ?IMMEDIATE, <<"\\">>, fun ffe:backslash/4 }.
+?IXT("\\", backslash).
 backslash(SP,RP,IP,WP) ->
     in(span()),  %% skip all characters in input buffer
     next(SP,RP,IP,WP).
 
-paren() -> 
-    { ?IMMEDIATE, <<"(">>, fun ffe:paren/4 }. 
+?IXT("(", paren). 
 paren(SP,RP,IP,WP) ->
     word($)),       %% skip until ')'
     next(SP,RP,IP,WP).
 
-string() ->
-    { ?IMMEDIATE, <<"\"">>, fun ffe:string/4 }.
+?IXT("\"", string).
 string(SP,RP,IP,WP) ->
     String = word($"),
     case is_compiling() of
@@ -1263,6 +1503,7 @@ string(SP,RP,IP,WP) ->
 	false ->
 	    next([String|SP],RP,IP,WP)
     end.
+
 
 emit_value(Value) ->
     emit_value(altout(), Value).
@@ -1283,7 +1524,7 @@ emit_value(Fd, Value) ->
 %% output a word as erlang code - fixme only allow colon defs!
 ?XT("show", show_word).
 show_word(SP,RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
 	    show_def(user, Name, ?UNTHREAD_NONE, Xt);
@@ -1295,7 +1536,7 @@ show_word(SP,RP,IP,WP) ->
 %% unthread a word
 ?XT("unthread", unthread_word).
 unthread_word(SP,RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
 	    save_def(user, ffe, Name, ?UNTHREAD_ALL, Xt);
@@ -1309,7 +1550,7 @@ unthread_word(SP,RP,IP,WP) ->
 %% continue to work in interactive mode but will not compile!
 ?XT("remove", remove_word).
 remove_word(SP,RP,IP,WP) ->
-    Name = word($\s),
+    Name = word(?SPACE),
     Current = maps:remove(Name, current()),
     current(Current),
     next(SP,RP,IP,WP).

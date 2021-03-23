@@ -124,7 +124,7 @@ words() ->
       ?WORD("ffloor", ffloor),
       ?WORD("fmax", fmax),
       ?WORD("fmin", fmin),
-      ?WORD("fegate", fegate),
+      ?WORD("fnegate", fnegate),
       ?WORD("fround", fround),
       ?WORD("fsqrt", fsqrt),
       ?WORD("f0<", 'f0<'),

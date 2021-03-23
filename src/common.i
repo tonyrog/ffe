@@ -26,7 +26,7 @@ two_minus(SP,RP,IP,WP) ->
 ?IXT("[defined]", defined).
 defined(SP,RP,IP,WP) ->
     Name = word($\s),
-    case tick_(Name) of
+    case find_word_(Name) of
 	{_,_Xt} -> 
 	    next([?TRUE|SP], RP, IP, WP);
 	false -> 
@@ -36,7 +36,7 @@ defined(SP,RP,IP,WP) ->
 ?IXT("[undefined]", undefined).
 undefined(SP,RP,IP,WP) ->
     Name = word($\s),
-    case tick_(Name) of
+    case find_word_(Name) of
 	{_,_Xt} -> 
 	    next([?FALSE|SP], RP, IP, WP);
 	false -> 

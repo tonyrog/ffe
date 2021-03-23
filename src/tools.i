@@ -19,23 +19,22 @@ emit_stack(SP, RP, IP, WP) ->
 		  end, lists:reverse(SP)),
     next(SP, RP, IP, WP).
 
-emit_words() ->
-    { 0, <<"words">>, fun ffe:emit_words/4 }.
+?XT("words", emit_words).
 emit_words(SP, RP, IP, WP) ->
-    emit_dicts([current() | forth()]),
+    Words = collect_words([current() | forth()], []),
+    format_word_list(altout(), Words),
     next(SP, RP, IP, WP).
 
-emit_dicts([Dict|Ds]) ->
-    emit_dict(Dict),
-    emit_dicts(Ds);
-emit_dicts([]) ->
-    ok.
+collect_words([Dict|Ds], Acc) ->
+    Acc1  = collect_dict(Dict, Acc),
+    collect_words(Ds, Acc1);
+collect_words([], Acc) ->
+    Acc.
 
-emit_dict(Dict) ->
+collect_dict(Dict, Acc0) ->
     maps:fold(
-      fun(Name, _Xt, _Acc) ->
-	      emit_string(Name),
-	      emit_char($\s)
-      end, [], Dict).
+      fun(Name, _Xt, Acc) ->
+	      [Name | Acc]
+      end, Acc0, Dict).
 
 -endif.

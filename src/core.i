@@ -26,9 +26,10 @@ core_words() ->
        ?WORD("2swap",      two_swap),
        ?WORD("'",          tick),
        ?WORD("!",          store),
+       ?WORD("<#",         bracket_number),
        ?WORD("#",          number_sign),
+       ?WORD("#s",         number_sign_s),
        ?WORD("#>",         number_bracket),
-       ?WORD("#s",         number_sign),       
        ?WORD("*",          star),
        ?WORD("*/",         star_slash),
        ?WORD("*/mod",      star_slash_mod),
@@ -46,7 +47,6 @@ core_words() ->
        ?WORD("+!",         plus_store),
        ?WORD("+loop",      plus_loop),
        ?WORD("<",          less),
-       ?WORD("<#",         less_number),
        ?WORD("=",          equal),
        ?WORD(">",          greater),
        ?WORD(">body",      to_body),
@@ -55,12 +55,14 @@ core_words() ->
        ?WORD("abs",        abs),
        ?WORD("and",        'and'),
        ?WORD("arshift",    arshift),
+       ?WORD("bl",         bl),
        ?WORD("count",      count),
        ?WORD("cr",         cr),
        ?WORD("drop",       drop),
        ?WORD("dup",        dup),
        ?WORD("emit",       emit),
        ?WORD("find",       find),
+       ?WORD("hold",       hold),
        ?WORD("invert",     invert),
        ?WORD("lshift",     lshift),
        ?WORD("max",        max),
@@ -148,7 +150,7 @@ two_swap([D,C,B,A|SP],RP,IP,WP) ->
 %% lookup a word
 tick(SP, RP, IP, WP) ->
     Name = word($\s),
-    case tick_(Name) of
+    case find_word_(Name) of
 	{_,Xt} -> 
 	    next([Xt|SP], RP,IP, WP);
 	false -> 
@@ -159,16 +161,6 @@ tick(SP, RP, IP, WP) ->
 store([Addr,X|SP],RP,IP,Code) ->
     store_at(Addr,X),
     next(SP,RP,IP,Code).
-
-?XT("#", number_sign).
-number_sign(SP,RP,IP,WP) ->
-    ?FIXME(),
-    ?next(SP,RP,IP,WP).
-
-?XT("#>", number_bracket).
-number_bracket(SP,RP,IP,WP) ->
-    ?FIXME(),
-    ?next(SP,RP,IP,WP).
 
 ?XT("*", star).
 star(SP,RP,IP,WP) ->   ?star(SP,RP,IP,WP,next).
@@ -213,17 +205,17 @@ colon(SP, RP, IP, WP) ->
 ?IXT(";", semicolon).
 semicolon(SP,RP,IP,WP) ->
     compile_only(),
-    case csp() of
+    case get_csp() of
 	[] ->
 	    Def = comma_(fun ?MODULE:semis/0),
 	    Xt = fun() -> Def end,
 	    here({}),  %% clear defintion area
+	    NoName = (get_state() band ?NONAME) =:= ?NONAME,
 	    set_state(0),
-	    case ?nf(Def) of
-		"" -> 
+	    if NoName ->
 		    next([Xt|SP],RP,IP,WP);
-		Name ->
-		    define(Name, Xt),
+	       true ->
+		    define(?nf(Def), Xt),
 		    next(SP,RP,IP,WP)
 	    end;
 	_ ->
@@ -254,7 +246,7 @@ left_bracket(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 %% [char]
-?IXT("[char]", bracket_char).
+?IXT("[char]", bracket_care).
 bracket_care(SP,RP,IP,WP) ->
     compile_only(),
     Char = char(),
@@ -269,7 +261,7 @@ bracket_care(SP,RP,IP,WP) ->
 bracket_tick(SP,RP,IP,WP) ->
     compile_only(),
     Name = word($\s),
-    case tick_(Name) of
+    case find_word_(Name) of
 	{_,Xt} -> 
 	    comma_(Xt),
 	    next(SP, RP, IP, WP);
@@ -280,6 +272,38 @@ bracket_tick(SP,RP,IP,WP) ->
 ?XT("<", less).
 less([B,A|SP],RP,IP,WP) ->
     next([?BOOL(A<B)|SP],RP,IP,WP).
+
+?XT("<#", bracket_number).
+bracket_number(SP,RP,IP,WP) ->
+    hold_begin(),
+    next(SP,RP,IP,WP).
+
+%% Note that we do not use double precision number on stack
+%% since we have bignums but we may have to simulate it somehow?
+?XT("#", number_sign).
+number_sign([N|SP],RP,IP,WP) ->
+    N1 = hold_digits(1,N),
+    ?next([N1|SP],RP,IP,WP).
+
+?XT("hold", hold).
+hold([Char|SP],RP,IP,WP) ->
+    hold_char(Char),
+    ?next(SP,RP,IP,WP).
+
+?XT("#s", number_sign_s).
+number_sign_s([N|SP],RP,IP,WP) ->
+    N1 = if N =:= 0 ->
+		 hold_char($0),
+		 0;
+	    true ->
+		 hold_digits(-1,N)
+	 end,
+    next([N1|SP],RP,IP,WP).
+
+?XT("#>", number_bracket).
+number_bracket(SP,RP,IP,WP) ->
+    Addr = hold_end(),
+    next([byte_size(Addr),Addr|SP],RP,IP,WP).
 
 ?XT("=", equal).
 equal([B,A|SP],RP,IP,WP) ->
@@ -346,7 +370,7 @@ emit([Char|SP],RP,IP,WP) ->
 
 ?XT("find", find).
 find([Name|SP],RP,IP,WP) ->
-    case tick_(Name) of
+    case find_word_(Name) of
 	false ->
 	    next([?FALSE|SP],RP,IP,WP);
 	{true,Xt} ->
@@ -367,6 +391,22 @@ arshift() ->
     { 0, <<"arshift">>, fun ?MODULE:arshift/4 }.
 arshift(SP,RP,IP,WP) ->
     ?arshift(SP,RP,IP,WP,next).
+
+?XT(bl).
+bl(SP,RP,IP,WP) -> next([$\s|SP],RP,IP,WP).
+
+?XT(count).
+count(SP=[Addr|_],RP,IP,WP) ->
+    if is_binary(Addr) ->
+	    next([byte_size(Addr)|SP],RP,IP,WP);
+       true ->
+	    next([0|SP],RP,IP,WP)
+    end.
+
+?XT(cr).
+cr(SP,RP,IP,WP) ->
+    emit_chars([$\r,$\n]),
+    next(SP,RP,IP,WP).
 
 ?XT("abs", abs).
 abs(SP,RP,IP,WP) ->
@@ -403,6 +443,25 @@ zero_equals(SP,RP,IP,WP) ->
 ?XT("0<", zero_less).
 zero_less(SP,RP,IP,WP) ->
     ?zero_less(SP,RP,IP,WP,next).
+
+?XT("space", space).
+space(SP,RP,IP,WP) ->
+    emit_char($\s),
+    next(SP,RP,IP,WP).
+
+?XT("spaces", spaces).
+spaces([U|SP],RP,IP,WP) ->
+    emit_chars(lists:duplicate(U,$\s)),
+    next(SP,RP,IP,WP).
+
+?XT("type", type).
+type([U,Addr|SP],RP,IP,WP) ->
+    if is_binary(Addr) ->
+	    emit_chars(altout(), U, Addr),
+	    next(SP,RP,IP,WP);
+       true ->
+	    next(SP,RP,IP,WP)
+    end.
 
 ?XT("word", word).
 word([Char|SP],RP,IP,WP) ->

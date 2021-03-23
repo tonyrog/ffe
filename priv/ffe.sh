@@ -1,4 +1,7 @@
 #!/bin/bash
 #   simple ffe start script
 
-exec erl -noshell -s ffe
+stty --f /dev/tty icanon raw -echo
+erl -noshell -s ffe
+stty echo echok icanon -raw
+
