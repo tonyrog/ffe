@@ -722,6 +722,7 @@ refill() ->
 
 -define(CTRL_A, $\^a).  %% beginning of line
 -define(CTRL_B, $\^b).  %% backward char
+-define(CTRL_D, $\^d).  %% delete char
 -define(CTRL_E, $\^e).  %% end of line
 -define(CTRL_F, $\^f).  %% forward char
 -define(CTRL_K, $\^k).  %% kill (cut) until end of line
@@ -760,24 +761,26 @@ get_line(In, Out, After, Before) ->
 	    get_line_bs(In, Out, After, Before);
 	?BACKSPACE ->
 	    get_line_bs(In, Out, After, Before);
-	?CTRL_B ->
-	    get_line_backward_char(In, Out, After, Before);
-	left ->
-	    get_line_backward_char(In, Out, After, Before);
-	?CTRL_F ->
-	    get_line_forward_char(In, Out, After, Before);
-	right ->
-	    get_line_forward_char(In, Out, After, Before);
-	?CTRL_E ->
-	    get_line_end_of_line(In, Out, After, Before);
 	?CTRL_A ->
 	    get_line_beginning_of_line(In, Out, After, Before);
+	?CTRL_B ->
+	    get_line_backward_char(In, Out, After, Before);
+	?CTRL_D ->
+	    get_line_delete_char(In, Out, After, Before);
+	?CTRL_E ->
+	    get_line_end_of_line(In, Out, After, Before);
+	?CTRL_F ->
+	    get_line_forward_char(In, Out, After, Before);
 	?CTRL_K ->
 	    get_line_kill_to_end_of_line(In, Out, After, Before);
 	?CTRL_Y ->
 	    get_line_insert_from_kill_buffer(In, Out, After, Before);
+	left ->
+	    get_line_backward_char(In, Out, After, Before);
+	right ->
+	    get_line_forward_char(In, Out, After, Before);
 	Key when Key >= ?SPACE, Key =< $~ ->
-	    ffe_io:output(Out, [Key]),
+	    ffe_io:insert(Out, [Key]),
 	    get_line(In, Out, After, [Key|Before]);
 	Key ->
 	    ffe_io:beep(Out),
@@ -785,6 +788,16 @@ get_line(In, Out, After, Before) ->
 	    get_line(In, Out, After, Before)
     end.
 
+
+get_line_delete_char(In, Out, After, Before) ->
+    case Before of
+	[] ->
+	    ffe_io:beep(Out), %% option?
+	    get_line(In, Out, After, Before);
+	[_|Before1] ->
+	    ffe_io:delete(Out, -1),
+	    get_line(In, Out, After, Before1)
+    end.
 
 get_line_backward_char(In, Out, After, Before) ->
     case Before of
