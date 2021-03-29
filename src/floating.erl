@@ -32,21 +32,39 @@
 ?EXPORT('f0<').
 ?EXPORT('f0=').
 ?EXPORT('f<').
+?XPORT(has_floating).
+?XPORT(has_floating_stack).
+
+?XCON("has-floating", has_floating, ?TRUE).
+?XCON("has-floating-stack", has_floating_stack, ?FALSE).
+
+-define(next(SP,RP,IP,WP), ffe:next((SP),(RP),(IP),(WP))).
 
 ?XT(fdrop).
-fdrop(SP,RP,IP,WP) -> ?drop(SP,RP,IP,WP, ffe:next).
+fdrop(SP,RP,IP,WP) ->
+    [_|SP1] = SP,
+    ?next(SP1,RP,IP,WP).    
 
 ?XT(fdup).
-fdup(SP,RP,IP,WP) -> ?dup(SP,RP,IP,WP, ffe:next).
+fdup(SP,RP,IP,WP) -> 
+    [A|_] = SP,
+    ?next([A|SP],RP,IP,WP).
 
 ?XT(fover).
-fover(SP,RP,IP,WP) -> ?over(SP,RP,IP,WP, ffe:next).
+fover(SP,RP,IP,WP) ->
+    [_,B|_] = SP,
+    ?next([B|SP],RP,IP,WP).
 
 ?XT(frot).
-frot(SP,RP,IP,WP) -> ?rot(SP,RP,IP,WP, ffe:next).
+frot(SP,RP,IP,WP) -> 
+    [A,B,C|SP1] = SP,
+    ?next([C,A,B|SP1],RP,IP,WP).
 
 ?XT(fswap).
-fswap(SP,RP,IP,WP) -> ?swap(SP,RP,IP,WP, ffe:next).
+fswap(SP,RP,IP,WP) ->
+    [B,A|SP1] = SP,
+    ?next([A,B|SP1],RP,IP,WP).
+
 
 ?XT('n>f').    
 'n>f'([N|SP],RP,IP,WP) -> ?next([float(N)|SP],RP,IP,WP).
@@ -129,5 +147,7 @@ words() ->
       ?WORD("fsqrt", fsqrt),
       ?WORD("f0<", 'f0<'),
       ?WORD("f0=", 'f0='),
-      ?WORD("f<", 'f<')
+      ?WORD("f<", 'f<'),
+      ?WORD("has-floating", has_floating),
+      ?WORD("has-floating-stack", has_floating_stack)
      }.

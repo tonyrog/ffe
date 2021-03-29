@@ -42,9 +42,6 @@
 \ set base 8 
 : octal 8 base ! ;
 
-\ set base 2
-: bin 2 base ! ;
-
 \ core ext
 : tuck ( x1 x2 -- x2 x1 x2 ) swap over ;
 

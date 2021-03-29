@@ -31,6 +31,8 @@
 ?EXPORT(ftan).
 ?EXPORT(ftanh).
 
+-define(next(SP,RP,IP,WP), ffe:next((SP),(RP),(IP),(WP))).
+
 ?XT('f~').
 'f~'([F1,F2,F3|SP],RP,IP,WP) ->
     if F3 > 0.0 ->

@@ -12,16 +12,28 @@ common_words() ->
       ?WORD("2+",          two_plus),
       ?WORD(",\"",         comma_string), %% compile string
       ?WORD("[defined]",   defined),
-      ?WORD("[undefined]", defined)
+      ?WORD("[undefined]", defined),
+      %% not so common
+      ?WORD("-rot",        minus_rot)
      }.
 
 ?XT("2+", two_plus).
 two_plus(SP,RP,IP,WP) ->
-    ?two_plus(SP,RP,IP,WP,next).
+    case SP of
+	[A|SP1] when is_integer(A) ->
+	    next([A+2|SP1],RP,IP,WP);
+	[?WPTR(I,W)|SP1] ->
+	    next([?WPTR(I+2,W)|SP1],RP,IP,WP)
+    end.
 
 ?XT("2-", two_minus).
 two_minus(SP,RP,IP,WP) ->
-    ?two_minus(SP,RP,IP,WP,next).
+    case SP of
+	[A|SP1] when is_integer(A) ->
+	    next([A-2|SP1],RP,IP,WP);
+	[?WPTR(I,W)|SP1] ->
+	    next([?WPTR(I-2,W)|SP1],RP,IP,WP)
+    end.
 
 ?IXT("[defined]", defined).
 defined(SP,RP,IP,WP) ->
@@ -42,5 +54,11 @@ undefined(SP,RP,IP,WP) ->
 	false -> 
 	    next([?TRUE|SP], RP, IP, WP)
     end.
+
+%% not so common?
+?XT("-rot", minus_rot).
+minus_rot(SP,RP,IP,WP) ->
+    [A,B,C|SP1] = SP,
+    next([B,C,A|SP1],RP,IP,WP).
 
 -endif.

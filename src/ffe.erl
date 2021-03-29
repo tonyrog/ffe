@@ -3,6 +3,7 @@
 -export([start/0]).
 -export([run/0]).
 -export([define/2]).
+-export([call/2]).
 -compile(export_all).
 
 -define(INCLUDE_STRAP, true).
@@ -15,37 +16,7 @@
 -define(GET_STACK(_), erlang:get_stacktrace()).
 -endif.
 
--record(user,
-	{
-	 tib = <<>>,  %% text input buffer
-	 width = 0,   %% max width of word (fix me not used)
-	 dp = {},     %% data pointer (fixme)
-	 termio,
-	 altin = standard_io,
-	 altout = standard_io,
-	 in = 0,
-	 out = 0,
-	 state = 0,
-	 forth = [
-		  internal_words(),
-		  core_words(),
-		  core_ext_words(),
-		  common_words(),
-		  tools_words(),
-		  strap_words(),
-		  floating:words(),
-		  floating_ext:words()
-		 ],
-	 current = #{},    %% user defined words
-	 var = #{},        %% variables Ref => Value
-	 base = 10,        %% current base
-	 dpl = 0,
-	 csp = [],         %% control stack
-	 hsp = [],         %% hold area, stack!
-	 span = 0,
-	 hld = 0,
-	 latest = <<>>
-	}).
+-include("ffe.hrl").
 
 %% State flags
 -define(COMPILE,  16#01).
@@ -72,35 +43,42 @@
 -define(UNTHREAD_NONE, 0).
 -define(UNTHREAD_ALL, 1000000).
 
-%%
-%% Forth word layout:
-%% { Flags :: smudge | immediate
-%%   Name  :: binary()
-%%   CFA   :: function/4
-%%   PF1   :: function/0 | term
-%%   PF2   :: function/0 | term
-%%   ...
-%%   PFn   :: function/0 | term
-%% }
-%%
--define(FFA, 1).
--define(NFA, 2).
--define(CFA, 3).
--define(PFA, 4).
--define(ff(W), element(?FFA,(W))).        %% flags field
--define(nf(W), element(?NFA,(W))).        %% name field
--define(cf(W), element(?CFA,(W))).        %% code field :: fun/4
--define(pf(I,W), element((?PFA-1)+(I),(W))). %% 1..n parameter field :: fun/0|term() 
+-define(MAX_STACKTRACE_DEPTH, 10).
 
--define(set_ff(W, Flags), setelement(1, (W), (Flags))).
--define(set_nf(W, Name), setelement(2, (W), (Name))).
--define(set_cf(W, Code), setelement(3, (W), (Code))).
--define(set_pf(I,W,Param), setelement(3+(I), (W), (Param))).
-
--define(name_len(Addr), byte_size((Addr))).
-
-
--include("ffe.hrl").
+-record(user,
+	{
+	 tib = <<>>,  %% text input buffer
+	 width = 0,   %% max width of word (fix me not used)
+	 dp = {},     %% data pointer (fixme)
+	 tty :: undefined | port(),  %% terminal input
+	 altout =  ?STANDARD_OUTPUT,
+	 in = 0,
+	 out = 0,
+	 state = 0,
+	 forth = [
+		  internal_words(),
+		  core_words(),
+		  core_ext_words(),
+		  common_words(),
+		  file_words(),
+		  tools_words(),
+		  strap_words(),
+		  floating:words(),
+		  floating_ext:words()
+		 ],
+	 current = #{},      %% user defined words
+	 var = #{},          %% variables Ref => Value
+	 argv = {<<"ffe">>}, %% ffe command line arguments
+	 base = 10,          %% current base
+	 dpl = 0,
+	 csp = [],           %% compile control stack
+	 hsp = [],           %% hold area, stack!
+	 blk = 0,
+	 source_id = 0,      %% -1 = string, 0 = tty input, fid = file input
+	 span = 0,
+	 hld = 0,
+	 latest = <<>>
+	}).
 
 start() ->
     init(),
@@ -111,30 +89,35 @@ run() -> start().
 compile(File) ->
     compile(File,[include,user]).
 
-compile(File,Opt) ->
+compile(Filename,Opt) ->
     init(),
-    {ok,Fd} = file:open(File, []),
-    set_user(#user.altin, Fd),
+    [0,Fd] = file_open(Filename, [raw,read,binary]),
+    set_user(#user.source_id, Fd),
     try main([]) of 
 	[] -> 
-	    save(File,Opt);
+	    save(Filename,Opt);
 	Stack ->
-	    io:format("warning: stack element after compilation: ~p\n",
-		      [Stack]),
-	    save(File,Opt)
+	    Msg = io_lib:format("warning: stack element after compilation: ~p",
+				[Stack]),
+	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]),
+	    save(Filename,Opt)
     catch
 	throw:{Code,Reason} ->
-	    io:format("error: ~w reason: ~p\n", [Code, Reason]);
-	?EXCEPTION(error,Error,Trace) ->
-	    io:format("error: internal error ~p\n~p", 
-		      [Error, ?GET_STACK(Trace)])
+	    Msg = io_lib:format("error: ~w reason: ~p",[Code,Reason]),
+	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]);
+	?EXCEPTION(error,Error,_StackTrace) ->
+	    Msg = io_lib:format("error: internal error ~p", [Error]),
+	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]),
+	    dump_stacktrace(?GET_STACK(_StackTrace))
     after
 	file:close(Fd)
     end.
 
+%% Save words as erlang source code
+%% use ffe_beam to save directly as beam code
 %% go through dictionary and write them as word defintions.
-save(File,Opt) ->
-    Module = filename:basename(File, ".fs"),
+save(Filename,Opt) ->
+    Module = filename:basename(Filename, ".fs"),
     MODULE = string:to_upper(Module),
     BootStrap = lists:member(bootstrap, Opt),
     Unthread = case lists:member(unthread, Opt) of
@@ -142,9 +125,9 @@ save(File,Opt) ->
 		   true -> ?UNTHREAD_ALL
 	       end,
     Mode = case lists:member(include, Opt) of
-	       true -> 
+	       true ->
 		   include;
-	       false -> 
+	       false ->
 		   case lists:member(erlang, Opt) of
 		       true -> erlang;
 		       false -> include
@@ -153,18 +136,22 @@ save(File,Opt) ->
     User = lists:member(user, Opt),
     case Mode of
 	include ->
-	    if User -> Fd = user;
-	       true -> {ok,Fd} = file:open(Module ++ ".i", [write])
+	    if User ->
+		    Fd = ?STANDARD_OUTPUT;
+	       true ->
+		    [0,Fd] = file_open(Module ++ ".i", [raw,write])
 	    end,
-	    io:format(Fd, "-ifndef(__~s__).\n", [MODULE]),
-	    io:format(Fd, "-define(__~s__, true).\n", [MODULE]);
+	    emit_strings(Fd, ["-ifndef(__",MODULE,"__).\n"]),
+	    emit_strings(Fd, ["-define(__",MODULE,"__, true).\n"]);
        erlang ->
-	    if User -> Fd = user;
-	       true -> {ok,Fd}  = file:open(Module ++ ".erl", [write])
+	    if User ->
+		    Fd = ?STANDARD_OUTPUT;
+	       true ->
+		    [0,Fd] = file_open(Module ++ ".erl", [raw,write])
 	    end,
-	    io:format(Fd, "%% -*- erlang -*-\n", []),
-	    io:format(Fd, "-module(~s).\n", [Module]),
-	    io:format(Fd, "-compile(export_all).\n", [])
+	    emit_string(Fd, "%% -*- erlang -*-\n"),
+	    emit_strings(Fd, ["-module(",Module,").\n"]),
+	    emit_string(Fd, "-compile(export_all).\n")
     end,
     %% module dictionary
     WordsName = if BootStrap; Mode =:= include ->
@@ -180,12 +167,15 @@ save(File,Opt) ->
 	    save_dict_words(Fd, list_to_atom(Module), WordsName, current())
     end,
     if Mode =:= include ->
-	    io:format(Fd, "-endif.\n", []);
+	    emit_string(Fd, "-endif.\n");
 	true ->
 	    ok
     end,
-    if not is_atom(Fd) ->
-	    file:close(Fd);
+    if is_integer(Fd), Fd > 2 ->
+	    case file_close(Fd) of
+		0 -> ok;
+		IOR -> {error, IOR}
+	    end;
        true  ->
 	    ok
     end.
@@ -201,10 +191,12 @@ save_dict(Fd, Module, Unthread, Dict) ->
 
 save_def(Fd, Module, Name, Unthread, Xt) ->
     W = Xt(),
-    io:format(Fd, "~p() ->\n  {~w, ~p", 
-	      [binary_to_atom(Name),?ff(W),?nf(W)]),
+    emit_strings(Fd,[Name,"() ->\n  {",
+		     integer_to_list(?ff(W)),
+		     ", ",
+		     "<<",?nf(W),">>"]),
     save_words(Fd, Module, 3, Unthread, W),
-    io:format(Fd, "}.\n", []),
+    emit_string(Fd, "}.\n"),
     {Module,Name}.
 
 save_words(Fd, Current, I, Unthread, Word) when I =< tuple_size(Word) ->
@@ -214,8 +206,8 @@ save_words(_Fd, _Current, _I, _Unthread, _Word) ->
     ok.
 
 save_word(Fd, Current, Unthread, W) when is_function(W) ->
-    {arity,Arity} = erlang:fun_info(W, arity),
-    {name,Name} = erlang:fun_info(W, name),
+    {arity,Arity}   = erlang:fun_info(W, arity),
+    {name,Name}     = erlang:fun_info(W, name),
     {module,Module} = erlang:fun_info(W, module),
     if Arity =:= 0 ->
 	    Def = W(),
@@ -226,38 +218,67 @@ save_word(Fd, Current, Unthread, W) when is_function(W) ->
 		    if Unthread > 0 ->
 			    save_words(Fd, Current, 4, Unthread-1, Def);
 		       true ->
-			    io:format(Fd, ",\n  fun ~p:~p/0", 
-				      [list_to_atom(Current),
-				       binary_to_atom(?nf(Def))])
+			    emit_strings(fd,[",\n  fun ",
+					     format_atom(Current),
+					     ":", ?nf(Def), "/0"])
 		    end;
 		Semis ->
 		    if Unthread =:= ?UNTHREAD_ALL;
 		       Unthread =:= 0 ->
-			    io:format(Fd, ",\n  fun ffe:semis/0", []);
+			    emit_string(Fd, ",\n  fun ffe:semis/0");
 		       Unthread > 0 ->
 			    ok
 		    end;
 		_ ->
-		    io:format(Fd, ",\n  fun ~p:~p/0", 
-			      [Module, Name])
+		    emit_strings(Fd, [",\n  fun " |
+				      format_mfa(Module,Name, 0)])
 	    end;
        true -> 
-	    io:format(Fd, ",\n  fun ~p:~p/~w",
-		      [Module, Name, Arity])
+	    emit_strings(Fd, [",\n  fun " | format_mfa(Module,Name,Arity)])
     end;
 save_word(Fd, _Current, _Unthread, W) -> %% literals etc
-    io:format(Fd, ",\n  ~p", [W]).
+    emit_string(Fd, ",\n  "),
+    emit_value(Fd, W).
+
+format_mfa(M,F,A) when is_atom(M), is_atom(F), is_integer(A) ->
+    [format_atom(A),":",format_atom(F),"/",format_int(A)].
+
+format_int(X) ->
+    integer_to_list(X).
+
+format_atom(A) when is_atom(A) ->
+    Cs = atom_to_list(A),
+    case need_quote(Cs) of
+	true -> [$'] ++ Cs ++ [$'];
+	false -> Cs
+    end.
+
+need_quote([C|Cs]) ->
+    if C >= $a, C =< $z -> need_quote_(Cs);
+       true -> true
+    end.
+    
+need_quote_([C|Cs]) ->
+    if C >= $0, C =< $9 -> need_quote_(Cs);
+       C >= $a, C =< $z -> need_quote_(Cs);
+       C >= $A, C =< $Z -> need_quote_(Cs);
+       C =:= $@ -> need_quote_(Cs);
+       true -> true
+    end;
+need_quote_([]) ->
+    false.
 
 %% "save" the dictionary
 save_dict_words(Fd, Module, WordsName, Dict) when is_atom(Module) ->
-    io:format(Fd, "~s() ->\n  #{\n", [WordsName]),
+    emit_strings(Fd, [WordsName,"() ->\n  #{\n"]),
     maps:fold(
       fun(Name, _Xt, _Acc) ->
-	      io:format(Fd, "      <<\"~s\">> => fun ~p:~p/0,\n",
-			[Name, Module, binary_to_atom(Name)])
+	      emit_strings(Fd,["      <<\"", Name, "\">> => ",
+			       format_mfa(Module,binary_to_atom(Name),0),
+			       ",\n"])
       end, [], Dict),
-    io:format(Fd, "      <<>> => false\n", []),  %% dummy clause
-    io:format(Fd, "  }.\n", []).
+    emit_string(Fd, "      <<>> => false\n"),  %% dummy clause (FIXME)
+    emit_string(Fd, "  }.\n").
 
 
 show_def(Fd, Name, Unthread, Xt) ->
@@ -317,8 +338,21 @@ show_word_(Fd, _Unthread, W) ->
 
 %% setup test environment
 init() ->
-    Port = ffe_io:open(),
-    put(user, #user { termio = Port, altin = Port, altout = Port }),
+    Args = [list_to_binary(Arg) || Arg <- init:get_plain_arguments()],
+    Argv = list_to_tuple(Args),
+    try ffe_tty:open() of
+	TTY ->
+	    put(user, #user { argv = ?WPTR(1,Argv),
+			      tty = TTY,
+			      source_id = ?TERMINAL_INPUT,
+			      altout = ?TERMINAL_OUTPUT })
+    catch
+	error:einval ->  %% assume pipe/standard io
+	    put(user, #user { argv = ?WPTR(1,Argv),
+			      tty = undefined,
+			      source_id = ?STANDARD_INPUT,
+			      altout = ?STANDARD_OUTPUT })
+    end,
     ok.
 
 get_user(Field) ->
@@ -344,13 +378,15 @@ in(Offset) when is_integer(Offset),Offset>=0 -> set_user(#user.in, Offset).
 get_out() -> get_user(#user.out).
 set_out(N) when is_integer(N),N>=0 -> set_user(#user.out, N).
 
+source_id() -> get_user(#user.source_id).
+
 %% source is tib in> @
 source() -> {tib(),in()}.
 source(Data,Offset) -> tib(Data),in(Offset),span(byte_size(Data)).
 
-altin() -> get_user(#user.altin).
 altout() -> get_user(#user.altout).
-termio() -> get_user(#user.termio).
+
+tty() -> get_user(#user.tty).
 
 get_base() -> get_user(#user.base).
 set_base(Base) when is_integer(Base), Base > 1, Base =< 36 ->
@@ -439,11 +475,25 @@ set_value(Var, Value) ->
 define(Name,W) ->
     current(maps:put(Name,W,current())).
 
+%% Call FFE from erlang
+call(Xt, Args) when is_function(Xt,0), is_list(Args) ->
+    call_(Xt(), Args);
+call(W, Args) when is_tuple(W), is_list(Args) ->
+    call_(W, Args).
+
+call_(W, Args) ->
+    CFA = ?cf(W),
+    R = exec_ret(),
+    put(user, #user {}),
+    CFA(lists:reverse(Args),[],?WPTR(4,R),?WPTR(4,W)).
+
 %% FIRST VERSION in Erlang - to validate the idea
 %% REWRITE in forth!
 %%
 quit0() ->
-    tib(<<>>), in(0),
+    tib(<<>>), 
+    in(0),
+    set_state(0),
     main([]).
 
 main(SP) ->
@@ -480,7 +530,7 @@ main_number(Compile,Name,SP) ->
 		    main([Flt|SP])
 	    catch
 		?EXCEPTION(error,_Error,_Trace) ->
-		    io:format("~s ?\n", [Name]),
+		    emit_strings(altout(),[Name, " ?\n"]),
 		    quit0()
 	    end
     end.
@@ -509,41 +559,51 @@ exec(W, SP) ->
 	throw:{?QUIT=_Code,_Reason} ->
 	    quit0();
 	throw:{?UNDEF=Code,Reason} ->
-	    io:format("~w : ~p\n", [Code, Reason]),
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
 	    quit0();
 	throw:{Code,Reason} ->
-	    io:format("~w : ~w\n", [Code, Reason]),
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
 	    quit0();
 	?EXCEPTION(error,{case_clause,SP0},_StackTrace) when is_list(SP0) ->
-	    CallStack = ?GET_STACK(_StackTrace),
-	    Calls = string:join(callstack(CallStack), " "),
-	    %% fixme: print forth word where error occured 
-	    io:format("Stack empty\r\n", []),
-	    io:format("  call: ~p\r\n", [Calls]),
-	    io:format("  call stack: ~p\n", [CallStack]),
+	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0();
 	?EXCEPTION(error,function_clause,_StackTrace) ->
-	    CallStack = ?GET_STACK(_StackTrace),
-	    Calls = string:join(callstack(CallStack), " "),
-	    %% fixme: print forth word where error occured 
-	    io:format("Stack empty\r\n", []),
-	    io:format("  call: ~p\r\n", [Calls]),
-	    io:format("  call stack: ~p\r\n", [CallStack]),
+	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0();
-
 	?EXCEPTION(error,Reason,_StackTrace) ->
-	    CallStack = ?GET_STACK(_StackTrace),
-	    io:format("Internal error: ~p\r\n", [Reason]),
-	    io:format("  call stack: ~p\r\n", [CallStack]),	    
+	    ffe_tio:output(?STANDARD_OUTPUT, "Internal error "),
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~p", [Reason])),
+	    ffe_tio:output(?STANDARD_OUTPUT, [?CRNL]),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0()
     end.
 
-callstack([{ffe,Word,_,_}|Stack]) ->
-    [atom_to_list(Word) | callstack(Stack)];
-callstack([_ | _Stack]) ->
-    ["..."];
-callstack([]) ->
-    [].
+dump_stacktrace(StackTrace) ->
+    dump_stacktrace(StackTrace,?MAX_STACKTRACE_DEPTH).
+
+dump_stacktrace(_StackTrace, 0) ->
+    ffe_tio:output(?STANDARD_OUTPUT, ["  ...",?CRNL]),
+    ok;
+dump_stacktrace([{ffe,Word,0,_}|Stack],Depth) ->
+    Msg = io_lib:format("~s", [Word]),
+    ffe_tio:output(?STANDARD_OUTPUT, ["  ",Msg,?CRNL]),
+    dump_stacktrace(Stack, Depth-1);
+dump_stacktrace([{Mod,Fun,Arity,Location}|Stack],Depth) ->
+    Info =
+	case proplists:get_value(file, Location, undefined) of
+	    undefined -> "";
+	    File ->
+		Line = proplists:get_value(line, Location, 0),
+		LineInfo = integer_to_list(Line),
+		[File,":",LineInfo," "]
+	end,
+    Msg = io_lib:format("~s~s:~s/~w", [Info,Mod,Fun,Arity]),
+    ffe_tio:output(?STANDARD_OUTPUT, ["  ",Msg,?CRNL]),
+    dump_stacktrace(Stack,Depth-1);
+dump_stacktrace([],_Depth) ->
+    ok.
 
 %%
 %% Find a word:
@@ -633,10 +693,36 @@ char() ->
 	    Char
     end.
 
+%% read a line and put it in TIB 
+refill() ->
+    SourceID = source_id(),
+    ALTOUT = altout(),
+    case is_compiling() of
+	false when SourceID =:= ?TERMINAL_INPUT, 
+		   ALTOUT =:= ?TERMINAL_OUTPUT ->
+	    emit_string(ALTOUT, " ok\r\n");
+	_ ->
+	    ok
+    end,
+    case ffe_tio:get_line(SourceID) of
+	eof ->
+	    source(<<>>,0),
+	    eof;
+	Data ->
+	    set_out(0), %%? ok?
+	    Data1 = erlang:iolist_to_binary(Data),
+	    Sz1 = byte_size(Data1)-1,
+	    %% strip newline
+	    case Data1 of
+		<<Data2:Sz1/binary,$\n>> -> source(Data2,0);
+		Data2 -> source(Data2,0)
+	    end
+    end.
+
 expand(RevLine) ->
     %% match dictionary and collect all prefix matches
     Match = collect_until(RevLine, ?SPACE, []),
-    case match_dicts(Match, [current() | forth()], []) of
+    case match_dicts(Match, [ffe:current() | ffe:forth()], []) of
 	[] ->
 	    {no, <<"">>, []};
 	[OneMatch] -> 
@@ -651,7 +737,7 @@ expand(RevLine) ->
 	    Insert = remove_prefix(CommonMatch, Match),
 	    {yes, Insert, MultipleMatches}
     end.
-	    
+
 match_dicts(Match, [Dict|Ds], Acc) ->    
     Acc1 = match_dict(Match, Dict, Acc),
     match_dicts(Match, Ds, Acc1);
@@ -694,181 +780,6 @@ collect_until([], _C, Acc) ->
 collect_until([C|Cs], Char, Acc) ->
     collect_until(Cs, Char, [C|Acc]).
 
-%% read a line and put it in TIB 
-refill() ->
-    ALTIN = altin(),
-    ALTOUT = altout(),
-    Terminal = termio(),
-    case is_compiling() of
-	false when ALTIN =:= Terminal, ALTOUT =:= Terminal ->
-	    emit_string(ALTOUT, " ok\r\n");
-	_ ->
-	    ok
-    end,
-    case get_line(ALTIN, ALTOUT) of
-	eof ->
-	    source(<<>>,0),
-	    eof;
-	Data ->
-	    set_out(0), %%? ok?
-	    Data1 = erlang:iolist_to_binary(Data),
-	    Sz1 = byte_size(Data1)-1,
-	    %% strip newline
-	    case Data1 of
-		<<Data2:Sz1/binary,$\n>> -> source(Data2,0);
-		Data2 -> source(Data2,0)
-	    end
-    end.
-
--define(CTRL_A, $\^a).  %% beginning of line
--define(CTRL_B, $\^b).  %% backward char
--define(CTRL_D, $\^d).  %% delete char
--define(CTRL_E, $\^e).  %% end of line
--define(CTRL_F, $\^f).  %% forward char
--define(CTRL_K, $\^k).  %% kill (cut) until end of line
--define(CTRL_P, $\^p).  %% previous line
--define(CTRL_Y, $\^y).  %% yank(insert) from kill buffer
--define(BACKSPACE, 127).
-
-%% {esc,$b} - backward word
-%% {esc,$f} - forward word
-
-get_line(In, Out) ->
-    get_line(In, Out, [], []).
-
-get_line(In, Out, After, Before) ->
-    case ffe_io:input(In) of
-	eof -> eof;
-	?CR ->
-	    ffe_io:output(Out, [?SPACE]),
-	    lists:reverse(Before) ++ After;
-	?TAB ->
-	    {Silent,Insert,Expand} = expand(Before),
-	    if Silent =:= yes -> ok;
-	       Silent =:= no -> ffe_io:beep(Out)
-	    end,
-	    format_word_list(Out, Expand),
-	    Before1 = lists:reverse(binary_to_list(Insert),Before),
-	    if Expand =:= [], Insert =/= [] ->
-		    ffe_io:insert(Out, Insert);
-	       Expand =/= [] ->
-		    ffe_io:insert(Out, lists:reverse(Before1));
-	       true ->
-		    ok
-	    end,
-	    get_line(In, Out, After, Before1);
-	?BS ->
-	    get_line_bs(In, Out, After, Before);
-	?BACKSPACE ->
-	    get_line_bs(In, Out, After, Before);
-	?CTRL_A ->
-	    get_line_beginning_of_line(In, Out, After, Before);
-	?CTRL_B ->
-	    get_line_backward_char(In, Out, After, Before);
-	?CTRL_D ->
-	    get_line_delete_char(In, Out, After, Before);
-	?CTRL_E ->
-	    get_line_end_of_line(In, Out, After, Before);
-	?CTRL_F ->
-	    get_line_forward_char(In, Out, After, Before);
-	?CTRL_K ->
-	    get_line_kill_to_end_of_line(In, Out, After, Before);
-	?CTRL_Y ->
-	    get_line_insert_from_kill_buffer(In, Out, After, Before);
-	left ->
-	    get_line_backward_char(In, Out, After, Before);
-	right ->
-	    get_line_forward_char(In, Out, After, Before);
-	Key when Key >= ?SPACE, Key =< $~ ->
-	    ffe_io:insert(Out, [Key]),
-	    get_line(In, Out, After, [Key|Before]);
-	Key ->
-	    ffe_io:beep(Out),
-	    io:format("char ~p\n", [Key]),
-	    get_line(In, Out, After, Before)
-    end.
-
-
-get_line_delete_char(In, Out, After, Before) ->
-    case Before of
-	[] ->
-	    ffe_io:beep(Out), %% option?
-	    get_line(In, Out, After, Before);
-	[_|Before1] ->
-	    ffe_io:delete(Out, -1),
-	    get_line(In, Out, After, Before1)
-    end.
-
-get_line_backward_char(In, Out, After, Before) ->
-    case Before of
-	[] ->
-	    ffe_io:beep(Out), %% option?
-	    get_line(In, Out, After, Before);
-	[Char|Before1] ->
-	    ffe_io:move(Out, -1),
-	    get_line(In, Out, [Char|After], Before1)
-    end.
-
-get_line_forward_char(In, Out, After, Before) ->
-    case After of
-	[Char|After1] ->
-	    ffe_io:move(Out, 1),
-	    get_line(In, Out, After1, [Char|Before]);
-	[] ->
-	    ffe_io:beep(Out), %% option?
-	    get_line(In, Out, After, Before)
-    end.
-
-get_line_end_of_line(In, Out, After, Before) ->
-    case After of
-	[] ->
-	    ffe_io:beep(Out),
-	    get_line(In, Out, After, Before);
-	_ ->
-	    ffe_io:move(Out, length(After)),
-	    get_line(In, Out, [], lists:reverse(After,Before))
-    end.
-    
-get_line_beginning_of_line(In, Out, After, Before) ->
-    case Before of
-	[] ->
-	    ffe_io:beep(Out),
-	    get_line(In, Out, After, Before);
-	_ ->
-	    ffe_io:move(Out, -length(Before)),
-	    get_line(In, Out, lists:reverse(Before,After), [])
-    end.
-    
-get_line_bs(In, Out, After, Before) ->
-    case Before of
-	[_|Before1] ->
-	    ffe_io:delete(Out, -1),
-	    get_line(In, Out, After, Before1);
-	[] ->
-	    ffe_io:beep(Out),
-	    get_line(In, Out, After, Before)
-    end.
-
-get_line_kill_to_end_of_line(In, Out, After, Before) ->
-    case After of
-	[] ->
-	    put(kill_buffer, []),
-	    get_line(In, Out, After, Before);
-	_ ->
-	    ffe_io:delete(Out, length(After)),
-	    put(kill_buffer, After),
-	    get_line(In, Out, [], Before)
-    end.
-
-get_line_insert_from_kill_buffer(In, Out, After, Before) ->
-    case get(kill_buffer) of
-	[] ->
-	    get_line(In, Out, After, Before);
-	Yank ->
-	    ffe_io:insert(Out, Yank),
-	    get_line(In, Out, After, lists:reverse(Yank, Before))
-    end.
-
 %% FIXME use "real" output routine
 format_word_list(_Out, []) ->
     ok;
@@ -896,87 +807,15 @@ format_lines(Out, [], LineLength, Remain, _Width) ->
 emit_counted_string(Fd, WordName, Width) ->
     N = ?name_len(WordName),
     if N < Width ->
-	    ffe_io:output(Fd, WordName),
-	    ffe_io:output(Fd, lists:duplicate(Width-N,?SPACE)),
+	    ffe_tio:output(Fd, WordName),
+	    ffe_tio:output(Fd, lists:duplicate(Width-N,?SPACE)),
 	    set_out(get_out()+Width),
 	    Width;
        true ->
-	    ffe_io:output(Fd, WordName),
+	    ffe_tio:output(Fd, WordName),
 	    set_out(get_out()+N),
 	    N
     end.
-
-    
-emit_char(Char) ->
-    emit_char(altout(), Char).
-
-emit_char(Fd, Char) ->
-    if Char =:= $\r ->
-	    ffe_io:output(Fd,[$\r]),
-	    set_out(0);
-       Char =:= $\n ->
-	    ffe_io:output(Fd,[$\n]);
-       true ->
-	    ffe_io:output(Fd,[Char]),
-	    set_out(get_out()+1)
-    end.
-
-emit_chars(Chars) ->
-    emit_chars(altout(), Chars).
-
-emit_chars(Fd, Binary) when is_binary(Binary) ->
-    emit_chars_(Fd, binary_to_list(Binary));
-emit_chars(Fd, Chars) when is_list(Chars) ->
-    emit_chars_(Fd, Chars).
-
-emit_chars_(_Fd, []) ->
-    ok;
-emit_chars_(Fd, [C|Cs]) ->
-    emit_char(Fd, C),
-    emit_chars_(Fd, Cs).
-
-emit_nchars(N, Chars) ->
-    emit_chars(altout(), N, Chars).
-
-emit_chars(Fd, N, Binary) when is_binary(Binary) ->
-    emit_nchars_(Fd, N, binary_to_list(Binary));
-emit_chars(Fd, N, CharList) when is_list(CharList) ->
-    emit_nchars_(Fd, N, CharList).
-
-emit_nchars_(_Fd, _N, []) ->  ok;
-emit_nchars_(_Fd, 0, _Cs) ->   ok;
-emit_nchars_(Fd, N, [C|Cs]) ->
-    emit_char(Fd, C),
-    emit_nchars_(Fd, N-1, Cs).
-
-emit_string(String) ->
-    emit_string(altout(), String).
-emit_string(Fd, Binary) when is_binary(Binary) ->
-    emit_string_(Fd, binary_to_list(Binary));
-emit_string(Fd,Chars) when is_list(Chars) ->
-    emit_string_(Fd, Chars).
-
-emit_string_(_Fd, []) ->
-    ok;
-emit_string_(Fd, Cs) ->
-    case collect_line(Cs, 0, []) of
-	{true,_Len,Chars,Cs1} ->
-	    ffe_io:output(Fd, Chars),
-	    ffe_io:output(Fd, [?CR,?NL]),
-	    set_out(0),
-	    emit_string_(Fd, Cs1);
-	{false,Len,Chars,Cs1} ->
-	    ffe_io:output(Fd, Chars),
-	    set_out(get_out()+Len),
-	    emit_string_(Fd, Cs1)
-    end.
-
-collect_line([$\n|Cs], N, Acc) ->
-    {true, N, lists:reverse(Acc), Cs};
-collect_line([C|Cs], N, Acc) ->
-    collect_line(Cs, N+1, [C|Acc]);
-collect_line([], N, Acc) ->
-    {false, N, lists:reverse(Acc), []}.
 
 %%  ( ch c-addr len -- c-addr n1 n2 n3 )
 %%  n1 = offset to first none ch char (word start)
@@ -1051,16 +890,7 @@ internal_words() ->
       ?WORD("(loop)",     ploop),
       ?WORD("noop", noop),
       ?WORD("base", base),
-      
-      ?WORD("sp@",        spat),
-      ?WORD("rp@",        rpat),
-      ?WORD("sp!",        spstore),
-      ?WORD("rp!",        rpstore),
-      ?WORD("i",          i),
-      ?WORD("j",          j),
-      ?WORD("leave",      leave),
-
-      ?WORD("-rot",       rrot),
+      ?WORD("argv", argv),
 
       ?WORD("0",          zero),
       ?WORD("1",          one),
@@ -1327,17 +1157,12 @@ ploop(SP,[I|RP=[N|RP1]],?WPTR(IP,Code),WP) ->
 	    next(SP,RP1,?WPTR(IP+1,Code),WP)
     end.
 
-?XT("i", i).
-i(SP,[Ix|_]=RP,IP,Code) ->
-    next([Ix|SP],RP,IP,Code).
+%%?XT("base", base).
+%%base(SP,RP,IP,Code) ->
+%%    next([{user,#user.base}|SP],RP,IP,Code).
+?XUSR("base", base, #user.base).
 
-?XT("j", j).
-j(SP,[_,_,Jx|_]=RP,IP,Code) ->
-    next([Jx|SP],RP,IP,Code).
-
-?XT("base", base).
-base(SP,RP,IP,Code) ->
-    next([{user,#user.base}|SP],RP,IP,Code).
+?XUSR("argv", argv, #user.argv).
 
 ?XT("to", to).
 to([Value|SP],RP,IP,Code) ->
@@ -1466,34 +1291,6 @@ care(SP,RP,IP,WP) ->
     Char = char(),
     next([Char|SP],RP,IP,WP).
 
-?XT("-rot", m_rot).
-m_rot(SP,RP,IP,WP) ->
-    ?m_rot(SP,RP,IP,WP,next).
-
-?XT("sp@", spat).
-spat(SP,RP,IP,WP) ->
-    ?spat(SP,RP,IP,WP,next).
-
-?XT("rp@", rpat).
-rpat(SP,RP,IP,WP) ->
-    ?rpat(SP,RP,IP,WP,next).
-
-?XT("sp!", spstore).
-spstore(SP,RP,IP,WP) ->
-    ?spstore(SP,RP,IP,WP,next).
-
-?XT("rp!", rpstore).
-rpstore(SP,_RP,IP,WP) ->
-    ?rpstore(SP,_RP,IP,WP,next).
-
-zero() ->
-    { 0, <<"0">>, fun ffe:docon/4, 0 }.
-
-one() ->
-    { 0, <<"1">>, fun ffe:docon/4, 1 }.
-
-minus_one() ->
-    { 0, <<"-1">>, fun ffe:docon/4, -1 }.
 
 ?IXT("\\", backslash).
 backslash(SP,RP,IP,WP) ->
@@ -1517,30 +1314,13 @@ string(SP,RP,IP,WP) ->
 	    next([String|SP],RP,IP,WP)
     end.
 
-
-emit_value(Value) ->
-    emit_value(altout(), Value).
-emit_value(Fd, Value) ->
-    if is_integer(Value) ->
-	    emit_string(Fd,integer_to_list(Value, get_base()));
-       is_float(Value) ->
-	    emit_string(Fd,io_lib_format:fwrite_g(Value));
-       is_binary(Value) ->
-	    emit_string(Fd,Value);
-       is_pid(Value) ->
-	    emit_string(Fd,pid_to_list(Value));
-       true -> %% hmm recursivly display integers in base()!
-	    emit_string(Fd,lists:flatten(io_lib:format("~p",[Value])))
-    end.    
-
-
 %% output a word as erlang code - fixme only allow colon defs!
 ?XT("show", show_word).
 show_word(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
-	    show_def(user, Name, ?UNTHREAD_NONE, Xt);
+	    show_def(altout(), Name, ?UNTHREAD_NONE, Xt);
 	false ->
 	    throw({?UNDEF, Name})
     end,
@@ -1552,7 +1332,7 @@ unthread_word(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
-	    save_def(user, ffe, Name, ?UNTHREAD_ALL, Xt);
+	    save_def(altout(), ffe, Name, ?UNTHREAD_ALL, Xt);
 	false ->
 	    throw({?UNDEF, Name})
     end,
@@ -1590,12 +1370,106 @@ interpreting() ->
 	_ -> throw({-29, compiler_nesting})
     end.
 
+emit_value(Value) ->
+    emit_value(altout(), Value).
+emit_value(Fd, Value) ->
+    if is_integer(Value) ->
+	    emit_string(Fd,integer_to_list(Value, get_base()));
+       is_float(Value) ->
+	    emit_string(Fd,io_lib_format:fwrite_g(Value));
+       is_binary(Value) ->
+	    emit_string(Fd,Value);
+       is_pid(Value) ->
+	    emit_string(Fd,pid_to_list(Value));
+       true -> %% hmm recursivly display integers in base()!
+	    emit_string(Fd,lists:flatten(io_lib:format("~p",[Value])))
+    end.    
+
+    
+emit_char(Char) ->
+    emit_char(altout(), Char).
+
+emit_char(Fd, Char) ->
+    if Char =:= $\r ->
+	    ffe_tio:output(Fd,[$\r]),
+	    set_out(0);
+       Char =:= $\n ->
+	    ffe_tio:output(Fd,[$\n]);
+       true ->
+	    ffe_tio:output(Fd,[Char]),
+	    set_out(get_out()+1)
+    end.
+
+emit_chars(Chars) ->
+    emit_chars(altout(), Chars).
+
+emit_chars(Fd, Binary) when is_binary(Binary) ->
+    emit_chars_(Fd, binary_to_list(Binary));
+emit_chars(Fd, Chars) when is_list(Chars) ->
+    emit_chars_(Fd, Chars).
+
+emit_chars_(_Fd, []) ->
+    ok;
+emit_chars_(Fd, [C|Cs]) ->
+    emit_char(Fd, C),
+    emit_chars_(Fd, Cs).
+
+emit_nchars(N, Chars) ->
+    emit_chars(altout(), N, Chars).
+
+emit_chars(Fd, N, Binary) when is_binary(Binary) ->
+    emit_nchars_(Fd, N, binary_to_list(Binary));
+emit_chars(Fd, N, CharList) when is_list(CharList) ->
+    emit_nchars_(Fd, N, CharList).
+
+emit_nchars_(_Fd, _N, []) ->  ok;
+emit_nchars_(_Fd, 0, _Cs) ->   ok;
+emit_nchars_(Fd, N, [C|Cs]) ->
+    emit_char(Fd, C),
+    emit_nchars_(Fd, N-1, Cs).
+
+emit_strings(ListOfStrings) ->
+    emit_strings(altout(),ListOfStrings).
+emit_strings(Fd,ListOfStrings) when is_list(ListOfStrings) ->
+    [emit_string(Fd,String) || String <- ListOfStrings].
+
+emit_string(String) ->
+    emit_string(altout(), String).
+emit_string(Fd, Binary) when is_binary(Binary) ->
+    emit_string_(Fd, binary_to_list(Binary));
+emit_string(Fd,Chars) when is_list(Chars) ->
+    emit_string_(Fd, Chars).
+
+emit_string_(_Fd, []) ->
+    ok;
+emit_string_(Fd, Cs) ->
+    case collect_line(Cs, 0, []) of
+	{true,_Len,Chars,Cs1} ->
+	    ffe_tio:output(Fd, Chars),
+	    ffe_tio:output(Fd, [?CR,?NL]),
+	    set_out(0),
+	    emit_string_(Fd, Cs1);
+	{false,Len,Chars,Cs1} ->
+	    ffe_tio:output(Fd, Chars),
+	    set_out(get_out()+Len),
+	    emit_string_(Fd, Cs1)
+    end.
+
+collect_line([$\n|Cs], N, Acc) ->
+    {true, N, lists:reverse(Acc), Cs};
+collect_line([C|Cs], N, Acc) ->
+    collect_line(Cs, N+1, [C|Acc]);
+collect_line([], N, Acc) ->
+    {false, N, lists:reverse(Acc), []}.
+
+
 -include("core.i").
 -include("core_ext.i").
 -include("common.i").
 %%-include("search.i").
 -include("tools.i").
 %%-include("tools_ext.i").
+-include("file.i").
 
 -ifdef(INCLUDE_STRAP).
 -include("strap.i").
@@ -1603,3 +1477,7 @@ interpreting() ->
 strap_words() ->
     #{}.
 -endif.
+
+?XCON("0", zero, 0).
+?XCON("1", one,  1).
+?XCON("-1", minus_one,  -1).

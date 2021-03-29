@@ -79,15 +79,48 @@ core_words() ->
        ?WORD("spaces",     spaces),
        ?WORD("type",       type),
        ?WORD("word",       word),
-       ?WORD("xor",        'xor')
+       ?WORD("xor",        'xor'),
+
+       %% fixme sort
+      ?WORD("sp@",        spat),
+      ?WORD("rp@",        rpat),
+      ?WORD("sp!",        spstore),
+      ?WORD("rp!",        rpstore),
+      ?WORD("i",          i),
+      ?WORD("j",          j),
+      ?WORD("leave",      leave)
      }.
 
 
 ?XT("+", plus).
-plus(SP,RP,IP,WP) -> ?plus(SP,RP,IP,WP,next).
+plus(stack) ->
+    "( n1 n2 -- n3 )";
+plus(documentation) ->
+    "Add n2 to n1 giving the sum n3".
+plus(SP,RP,IP,WP) ->
+    case SP of
+	[B,A|SP1] when is_integer(A), is_integer(B) ->
+	    next([A+B|SP1],RP,IP,WP);
+	[B,?WPTR(A,W)|SP1] when is_integer(B) ->
+	    next([?WPTR(A+B,W)|SP1],RP,IP,WP);
+	[?WPTR(B,W),A|SP1] when is_integer(A) ->
+	    next([?WPTR(A+B,W)|SP1],RP,IP,WP)
+    end.
 
 ?XT("-", minus).
-minus(SP,RP,IP,WP) -> ?minus(SP,RP,IP,WP,next).
+minus(stack) ->
+    "( n1 n2 -- n3 )";
+minus(documentation) ->
+    "Subtract n2 from n1 giving the difference n3".
+minus(SP,RP,IP,WP) ->
+    case SP of
+	[B,A|SP1] when is_integer(A), is_integer(B) ->
+	    next([A-B|SP1],RP,IP,WP);
+	[B,?WPTR(A,W)|SP1] when is_integer(B) ->
+	    next([?WPTR(A-B,W)|SP1],RP,IP,WP);
+	[?WPTR(B,W),A|SP1] when is_integer(A) ->
+	    next([?WPTR(A-B,W)|SP1],RP,IP,WP)
+    end.
 
 %% , is currently a bit special
 ?XT(",", comma).
@@ -104,11 +137,21 @@ dot([Value|SP],RP,IP,WP) ->
 
 ?XT("1-", one_minus).
 one_minus(SP,RP,IP,WP) ->
-    ?one_minus(SP,RP,IP,WP,next).
+    case SP of
+	[A|SP1] when is_integer(A) ->
+	    next([A-1|SP1],RP,IP,WP);
+	[?WPTR(I,W)|SP1] ->
+	    next([?WPTR(I-1,W)|SP1],RP,IP,WP)
+    end.
 
 ?XT("1+", one_plus).
-oe_plus(SP,RP,IP,WP) ->
-    ?one_plus(SP,RP,IP,WP,next).
+one_plus(SP,RP,IP,WP) ->
+    case SP of
+	[A|SP1] when is_integer(A) ->
+	    next([A+1|SP1],RP,IP,WP);
+	[?WPTR(I,W)|SP1] ->
+	    next([?WPTR(I+1,W)|SP1],RP,IP,WP)
+    end.
 
 ?XT("2*", two_star).
 two_star([A|SP],RP,IP,WP) ->
@@ -163,13 +206,28 @@ store([Addr,X|SP],RP,IP,Code) ->
     next(SP,RP,IP,Code).
 
 ?XT("*", star).
-star(SP,RP,IP,WP) ->   ?star(SP,RP,IP,WP,next).
+star(SP,RP,IP,WP) ->
+    case SP of
+	[A,B|SP1] when is_integer(A), is_integer(B) ->
+	    next([A*B|SP1],RP,IP,WP)
+    end.
 
 ?XT("*/", star_slash).
-star_slash(SP,RP,IP,WP) -> ?star_slash(SP,RP,IP,WP,next).
+star_slash(SP,RP,IP,WP) ->
+    case SP of
+	[0|_] -> throw({?ARITH, "division by zero"});
+	[C,B,A|SP1] when is_integer(A), is_integer(B) ->
+	    next([(A*B) div C|SP1],RP,IP,WP)
+    end.
 
 ?XT("*/", star_slash_mod).
-star_slash_mod(SP,RP,IP,WP) -> ?star_slash_mod(SP,RP,IP,WP,next).
+star_slash_mod(SP,RP,IP,WP) ->
+    case SP of
+	[0|_] -> throw({?ARITH, "division by zero"});
+	[C,B,A|SP1] when is_integer(A), is_integer(B) ->
+	    T = A*B,
+	    next([T rem C, T div C|SP1],RP,IP,WP)
+    end.
 
 %% print string
 %% ." String"
@@ -186,11 +244,17 @@ dot_quote(SP,RP,IP,WP) ->
 
 ?XT("/", slash).
 slash(SP,RP,IP,WP) ->
-    ?slash(SP,RP,IP,WP,next).
+    case SP of
+	[0|_] -> throw({?ARITH, "division by zero"});
+	[B,A|SP]-> next([B div A|SP],RP,IP,WP)
+    end.
 
 ?XT("/mod", slash_mod).
-slash_mod(SP,RP,IP,WP) ->
-    ?slash_mod(SP,RP,IP,WP,next).
+slash_mod(SP,RP,IP,WP) ->    
+    case SP of
+	[0|_] -> throw({?ARITH, "division by zero"});
+	[B,A|SP]-> next([A rem B,A div B|SP],RP,IP,WP)
+    end.
 
 %% colon definition
 ?IXT(":", colon).
@@ -283,12 +347,12 @@ bracket_number(SP,RP,IP,WP) ->
 ?XT("#", number_sign).
 number_sign([N|SP],RP,IP,WP) ->
     N1 = hold_digits(1,N),
-    ?next([N1|SP],RP,IP,WP).
+    next([N1|SP],RP,IP,WP).
 
 ?XT("hold", hold).
 hold([Char|SP],RP,IP,WP) ->
     hold_char(Char),
-    ?next(SP,RP,IP,WP).
+    next(SP,RP,IP,WP).
 
 ?XT("#s", number_sign_s).
 number_sign_s([N|SP],RP,IP,WP) ->
@@ -328,19 +392,25 @@ rfrom(SP,[E|RP],IP,WP) ->
 
 ?XT("rot", rot).
 rot(SP,RP,IP,WP) ->
-    ?rot(SP,RP,IP,WP,next).
+    [A,B,C|SP1] = SP,
+    next([C,A,B|SP1],RP,IP,WP).
 
 ?XT("mod", mod).
 mod(SP,RP,IP,WP) ->
-    ?mod(SP,RP,IP,WP,next).
+    case SP of
+	[0|_] -> throw({?ARITH, "division by zero"});
+	[B,A|SP]-> next([A rem B|SP],RP,IP,WP)
+    end.
 
 ?XT("negate", negate).
 negate(SP,RP,IP,WP) ->
-    ?negate(SP,RP,IP,WP,next).
-
+    [A|SP1] = SP,
+    next([-A|SP1],RP,IP,WP).
+    
 ?XT("over", over).
 over(SP,RP,IP,WP) ->
-    ?over(SP,RP,IP,WP,next).
+    [_,B|_] = SP,
+    next([B|SP],RP,IP,WP).
 
 ?XT("quit", quit).
 quit(_SP,_RP,_IP,_WP) ->
@@ -348,15 +418,18 @@ quit(_SP,_RP,_IP,_WP) ->
 
 ?XT("drop", drop).
 drop(SP,RP,IP,WP) ->
-    ?drop(SP,RP,IP,WP,next).
+    [_|SP1] = SP,
+    next(SP1,RP,IP,WP).
 
 ?XT("swap", swap).
 swap(SP,RP,IP,WP) ->
-    ?swap(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A,B|SP1],RP,IP,WP).
 
 ?XT("dup", dup).
 dup(SP,RP,IP,WP) ->
-    ?dup(SP,RP,IP,WP,next).
+    [A|_] = SP,
+    next([A|SP],RP,IP,WP).
 
 %% emit character
 ?XT("emit", emit).
@@ -381,16 +454,20 @@ find([Name|SP],RP,IP,WP) ->
 
 ?XT("lshift", lshift).
 lshift(SP,RP,IP,WP) ->
-    ?lshift(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A bsl B|SP1],RP,IP,WP).
 
 ?XT("rshift", rshift).
 rshift(SP,RP,IP,WP) ->
-    ?rshift(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A bsr B|SP1],RP,IP,WP).    
+
 
 arshift() ->
     { 0, <<"arshift">>, fun ?MODULE:arshift/4 }.
 arshift(SP,RP,IP,WP) ->
-    ?arshift(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A bsr B|SP1],RP,IP,WP).
 
 ?XT(bl).
 bl(SP,RP,IP,WP) -> next([$\s|SP],RP,IP,WP).
@@ -410,39 +487,48 @@ cr(SP,RP,IP,WP) ->
 
 ?XT("abs", abs).
 abs(SP,RP,IP,WP) ->
-    ?abs(SP,RP,IP,WP,next).
+    [A|SP1] = SP,
+    next([abs(A)|SP1],RP,IP,WP).
 
 ?XT("and", 'and').
 'and'(SP,RP,IP,WP) ->
-    ?'and'(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A band B|SP1],RP,IP,WP).
 
 ?XT("or", 'or').
 'or'(SP,RP,IP,WP) ->
-    ?'or'(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A bor B|SP1],RP,IP,WP).    
 
 ?XT("invert", invert).
 invert(SP,RP,IP,WP) ->
-    ?invert(SP,RP,IP,WP,next).
+    [A|SP1] = SP,
+    next([bnot A|SP1],RP,IP,WP).
 
 ?XT("xor", 'xor').
 'xor'(SP,RP,IP,WP) ->
-    ?'xor'(SP,RP,IP,WP,next).
+    [B,A|SP1] = SP,
+    next([A bxor B|SP1],RP,IP,WP).    
 
 ?XT(min).
 min(SP,RP,IP,WP) ->
-    ?min(SP,RP,IP,WP,next).
+    [A,B|SP1] = SP,
+    next([erlang:min(A,B)|SP1],RP,IP,WP).
 
 ?XT(max).
 max(SP,RP,IP,WP) ->
-    ?max(SP,RP,IP,WP,next).
+    [A,B|SP1] = SP,
+    next([erlang:max(A,B)|SP1],RP,IP,WP).
 
 ?XT("0=", zero_equals).
 zero_equals(SP,RP,IP,WP) ->
-    ?zero_equals(SP,RP,IP,WP,next).
+    [A|SP1] = SP,
+    next([?BOOL(A=:=0)|SP1],RP,IP,WP).
 
 ?XT("0<", zero_less).
 zero_less(SP,RP,IP,WP) ->
-    ?zero_less(SP,RP,IP,WP,next).
+    [A|SP1] = SP,
+    next([?BOOL(A<0)|SP1],RP,IP,WP).
 
 ?XT("space", space).
 space(SP,RP,IP,WP) ->
@@ -467,5 +553,31 @@ type([U,Addr|SP],RP,IP,WP) ->
 word([Char|SP],RP,IP,WP) ->
     Word = word(Char),
     next([Word|SP],RP,IP,WP).
+
+?XT("sp@", spat).
+spat(SP,RP,IP,WP) ->
+    next([SP|SP],RP,IP,WP).
+
+?XT("rp@", rpat).
+rpat(SP,RP,IP,WP) ->
+    next([RP|SP],RP,IP,WP).
+
+?XT("sp!", spstore).
+spstore(SP,RP,IP,WP) ->
+    [SP1|_] = SP,
+    next(SP1,RP,IP,WP).
+
+?XT("rp!", rpstore).
+rpstore(SP,_RP,IP,WP) ->
+    [RP1|SP1] = SP,
+    next(SP1,RP1,IP,WP).
+
+?XT("i", i).
+i(SP,[Ix|_]=RP,IP,Code) ->
+    next([Ix|SP],RP,IP,Code).
+
+?XT("j", j).
+j(SP,[_,_,Jx|_]=RP,IP,Code) ->
+    next([Jx|SP],RP,IP,Code).
 
 -endif.

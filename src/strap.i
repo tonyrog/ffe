@@ -48,14 +48,6 @@
   fun ffe:rfrom/0,
   fun ffe:drop/0,
   fun ffe:semis/0}.
-bin() ->
-  {0, <<"bin">>,
-  fun ffe:docol/4,
-  fun ffe:lit/0,
-  2,
-  fun ffe:base/0,
-  fun ffe:store/0,
-  fun ffe:semis/0}.
 decimal() ->
   {0, <<"decimal">>,
   fun ffe:docol/4,
