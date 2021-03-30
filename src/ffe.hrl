@@ -13,7 +13,7 @@
 -define(UNDEF,           -13).   %% undefined word
 -define(ARGUMENT_MISMATCH, -12).
 -define(QUIT,            -56).
--define(INTRRUPT,        -28).   %% user interrupt
+-define(INTERRUPT,       -28).   %% user interrupt
 
 %%
 %% Forth word layout:
@@ -41,7 +41,6 @@
 -define(set_pf(I,W,Param), setelement(3+(I), (W), (Param))).
 
 -define(name_len(Addr), byte_size((Addr))).
-
 
 -define(XPORT(W), -export([W/0])).
 -define(EXPORT(W), -export([W/0, W/4])).

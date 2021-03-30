@@ -95,7 +95,8 @@
 
 start() ->
     init(),
-    main([]).
+    main([]),
+    halt(0).
 
 run() -> start().
 
@@ -1358,7 +1359,7 @@ to([Value|SP],RP,IP,Code) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
-	    Var = element(4, Xt()),
+	    Var = element(?PFA, Xt()),
 	    set_value(Var, Value),
 	    next(SP,RP,IP,Code);
 	false ->
@@ -1453,7 +1454,7 @@ semis(SP,[IP|RP],_IP,WP) ->
     case get_csp() of
 	[?CF_CREATE|Csp] ->
 	    Def = here(),
-	    Name = element(2, Def),
+	    Name = element(?NFA, Def),
 	    define(Name, fun() -> Def end),
 	    here({}),  %% clear defintion area
 	    set_csp(Csp),  %% pop control stack
