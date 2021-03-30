@@ -47,6 +47,10 @@
 
 -define(CF_CREATE, 100).
 
+-define(IF,   1).
+-define(ELSE, 2).
+-define(THEN, 4).
+
 -define(UNTHREAD_NONE, 0).
 -define(UNTHREAD_ALL, 1000000).
 
@@ -451,7 +455,7 @@ cf_pop() ->
 	    Tag
     end.
 
-cf_top() -> hd(get_csp()).
+%% cf_top() -> hd(get_csp()).
 cf_reset() -> set_csp([]).
 
 get_hsp() ->
