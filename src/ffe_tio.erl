@@ -62,23 +62,32 @@ read_n_chars(TTY, N, Acc) ->
 	Key -> read_n_chars(TTY, N-1, [Key|Acc])
     end.
 
+%% read line of data, return binary without the line terminator
+-spec get_line(Fd::integer()) -> binary().
+
 get_line(?TERMINAL_INPUT) ->
     ffe_tty:get_line(ffe:tty());
 get_line(?STANDARD_INPUT) ->
     case io:get_line(standard_io, '') of
-	eof ->
-	    eof;
-	Line when is_list(Line) ->
-	    Line -- "\n";
-	Line when is_binary(Line) ->
-	    binary_to_list(Line) -- "\n"
+	eof ->  eof;
+	Line -> strip_nl(Line)
     end;
+
 get_line(Fd) when is_integer(Fd), Fd > 2 ->
     case file:read_line(Fd) of
-	eof ->
-	    eof;
-	{ok,Line} when is_list(Line) ->
-	    Line -- "\n";
-	{ok,Line} when is_binary(Line) ->
-	    binary_to_list(Line) -- "\n"
+	eof -> eof;
+	{ok,Line} -> strip_nl(Line)
     end.
+
+
+strip_nl(Line) when is_binary(Line) ->
+    LineSize1 = byte_size(Line)-1,
+    LineSize2 = LineSize1-1,
+    case Line of
+	<<Line2:LineSize2,$\r,$\n>> -> Line2;
+	<<Line1:LineSize1,$\n>> -> Line1;
+	_ -> Line
+    end;
+strip_nl(Line) when is_list(Line) ->
+    strip_nl(list_to_binary(Line)).
+

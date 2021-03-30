@@ -5,10 +5,13 @@
 -define(__FFE_HRL__, true).
 
 -define(BYE,       bye).    %% fixme
+-define(ABORT,           -1).
+-define(ABORTQ,          -2).
 -define(STACK_OVERFLOW,  -3).
 -define(STACK_UNDERFLOW, -4).    %% case clause?
 -define(ARITH,           -10).   %% arith
 -define(UNDEF,           -13).   %% undefined word
+-define(ARGUMENT_MISMATCH, -12).
 -define(QUIT,            -56).
 -define(INTRRUPT,        -28).   %% user interrupt
 

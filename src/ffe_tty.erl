@@ -168,6 +168,7 @@ translate_keys([]) ->
 %% {esc,$b} - backward word
 %% {esc,$f} - forward word
 
+-spec get_line(Port::port()) -> binary().
 get_line(Port) ->
     get_line(Port, [], []).
 
@@ -176,7 +177,7 @@ get_line(Port, After, Before) ->
 	eof -> eof;
 	$\r ->
 	    output(Port, [$\s]),
-	    lists:reverse(Before) ++ After;
+	    list_to_binary(lists:reverse(Before) ++ After);
 	$\t ->
 	    %% FIXME: expand_fun!
 	    {Silent,Insert,Expand} = ffe:expand(Before),
@@ -224,7 +225,6 @@ get_line(Port, After, Before) ->
 	    %% io:format("char ~p\n", [Key]),
 	    get_line(Port, After, Before)
     end.
-
 
 get_line_delete_char(Port, After, Before) ->
     case Before of

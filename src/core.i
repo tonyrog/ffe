@@ -53,6 +53,8 @@ core_words() ->
        ?WORD(">r",         tor),
        ?WORD("r>",         rfrom),
        ?WORD("abs",        abs),
+       ?WORD("abort",      abort),
+       ?WORD("abort\"",    abort_quote),
        ?WORD("and",        'and'),
        ?WORD("arshift",    arshift),
        ?WORD("bl",         bl),
@@ -61,9 +63,11 @@ core_words() ->
        ?WORD("drop",       drop),
        ?WORD("dup",        dup),
        ?WORD("emit",       emit),
+       ?WORD("false",      false),
        ?WORD("find",       find),
        ?WORD("hold",       hold),
        ?WORD("invert",     invert),
+       ?WORD("key",        key),
        ?WORD("lshift",     lshift),
        ?WORD("max",        max),
        ?WORD("min",        min),
@@ -77,10 +81,10 @@ core_words() ->
        ?WORD("swap",       swap),
        ?WORD("space",      space),
        ?WORD("spaces",     spaces),
+       ?WORD("true",       true),
        ?WORD("type",       type),
        ?WORD("word",       word),
        ?WORD("xor",        'xor'),
-
        %% fixme sort
       ?WORD("sp@",        spat),
       ?WORD("rp@",        rpat),
@@ -91,6 +95,8 @@ core_words() ->
       ?WORD("leave",      leave)
      }.
 
+?XCON("true", true, ?TRUE).
+?XCON("false", false, ?FALSE).
 
 ?XT("+", plus).
 plus(stack) ->
@@ -232,7 +238,7 @@ star_slash_mod(SP,RP,IP,WP) ->
 %% print string
 %% ." String"
 %% compile: compile string literal that is printed at runtime
-?XT(".\"", dot_quote).
+?IXT(".\"", dot_quote).
 dot_quote(SP,RP,IP,WP) ->
     compile_only(),
     String = word($"),
@@ -327,6 +333,7 @@ bracket_tick(SP,RP,IP,WP) ->
     Name = word($\s),
     case find_word_(Name) of
 	{_,Xt} -> 
+	    comma_(fun ?MODULE:lit/0),
 	    comma_(Xt),
 	    next(SP, RP, IP, WP);
 	false -> 
@@ -470,7 +477,8 @@ arshift(SP,RP,IP,WP) ->
     next([A bsr B|SP1],RP,IP,WP).
 
 ?XT(bl).
-bl(SP,RP,IP,WP) -> next([$\s|SP],RP,IP,WP).
+bl(SP,RP,IP,WP) -> 
+    next([?SPACE|SP],RP,IP,WP).
 
 ?XT(count).
 count(SP=[Addr|_],RP,IP,WP) ->
@@ -482,13 +490,34 @@ count(SP=[Addr|_],RP,IP,WP) ->
 
 ?XT(cr).
 cr(SP,RP,IP,WP) ->
-    emit_chars([$\r,$\n]),
+    emit_chars([?CRNL]),
     next(SP,RP,IP,WP).
 
 ?XT("abs", abs).
 abs(SP,RP,IP,WP) ->
     [A|SP1] = SP,
     next([abs(A)|SP1],RP,IP,WP).
+
+?XT("abort", abort).
+abort(_SP,_RP,_IP,_WP) ->
+    throw({?ABORT, "aborted"}).
+
+?XT("(abort)", doabort).
+doabort(_SP,_RP,_IP,_WP) ->
+    throw({?ABORTQ, "aborted"}).
+
+?IXT("abort\"", abort_quote).
+abort_quote(SP,RP,IP,WP) ->
+    String = parse($"),
+    compile_only(),
+    comma_(fun ?MODULE:zbranch/0),
+    comma_(6),
+    comma_(fun ?MODULE:lit/0),
+    comma_(String),
+    comma_(fun ?MODULE:count/0),
+    comma_(fun ?MODULE:type/0),
+    comma_(fun ?MODULE:doabort/0),
+    next(SP,RP,IP,WP).
 
 ?XT("and", 'and').
 'and'(SP,RP,IP,WP) ->
@@ -579,5 +608,16 @@ i(SP,[Ix|_]=RP,IP,Code) ->
 ?XT("j", j).
 j(SP,[_,_,Jx|_]=RP,IP,Code) ->
     next([Jx|SP],RP,IP,Code).
+
+?XT("key", key).
+key(SP,RP,IP,Code) ->
+    case ffe_tio:input(ffe:get_source_id(), 1) of
+	[Key] ->
+	    next([Key|SP],RP,IP,Code);
+	[] ->
+	    next([0|SP],RP,IP,Code);
+	eof ->
+	    next([-1|SP],RP,IP,Code)
+    end.
 
 -endif.

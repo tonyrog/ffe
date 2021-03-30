@@ -59,7 +59,7 @@ file_words() ->
       ?WORD("include",      include),
       ?WORD("read-file",    read_file),
       ?WORD("read-line",    read_line),
-%%    ?WORD("refill",       refill),
+%%    ?WORD("refill",       refill),   CORE+FILE
       ?WORD("write-file",   write_file),
       ?WORD("write-line",   write_line),
       ?WORD("bin",          bin),
@@ -69,7 +69,7 @@ file_words() ->
       ?WORD("r/o",          read_only),
       ?WORD("r/w",          read_write),
       ?WORD("reposition-file", reposition_file),
-%%    ?WORD("s\"",          s_quote),
+%%    ?WORD("s\"",          s_quote),  CORE+FILE
       ?WORD("w/o",          write_only)
      }.
 
@@ -206,6 +206,29 @@ file_position([FileID|SP],RP,IP,WP) ->
     case file:position(get_fd(FileID), {cur,0}) of
 	{ok, Pos} ->
 	    next([0,Pos|SP],RP,IP,WP);
+	{error,Reason} ->
+	    next([ior(Reason),0|SP],RP,IP,WP)
+    end.
+
+?XT("file-size", file_size).
+file_size([FileID|SP],RP,IP,WP) ->
+    Fd  = get_fd(FileID),
+    Cur = file:position(Fd, {cur,0}),
+    case file:position(Fd, {eof,0}) of
+	{ok, Size} ->
+	    file:position(Fd, Cur),  %% restore position
+	    next([0,Size|SP],RP,IP,WP);
+	{error,Reason} ->
+	    next([ior(Reason),0|SP],RP,IP,WP)
+    end.
+
+?XT("read-info", file_info).
+file_info([N,A|SP],RP,IP,WP) ->
+    <<Filename:N/binary, _/binary>> = A,
+    case file:read_file_info(Filename) of
+	{ok,Info} ->
+	    %% where to put Data? (at Addr?)
+	    next([0,Info|SP],RP,IP,WP);
 	{error,Reason} ->
 	    next([ior(Reason),0|SP],RP,IP,WP)
     end.

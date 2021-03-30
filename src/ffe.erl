@@ -1,3 +1,10 @@
+%%% @author Tony Rogvall <tony@rogvall.se>
+%%% @copyright (C) 2021, Tony Rogvall
+%%% @doc
+%%%    FFE
+%%% @end
+%%% Created : 30 Mar 2021 by Tony Rogvall <tony@rogvall.se>
+
 -module(ffe).
 
 -export([start/0]).
@@ -45,9 +52,12 @@
 
 -define(MAX_STACKTRACE_DEPTH, 10).
 
+-type prim_buffer() :: reference().
+
 -record(user,
 	{
-	 tib = <<>>,  %% text input buffer
+	 tib = <<>>,       %% text input buffer
+	 pad :: undefined | prim_buffer(),  %% scratch input buffer
 	 width = 0,   %% max width of word (fix me not used)
 	 dp = {},     %% data pointer (fixme)
 	 tty :: undefined | port(),  %% terminal input
@@ -62,6 +72,8 @@
 		  common_words(),
 		  file_words(),
 		  tools_words(),
+		  tools_ext_words(),
+		  facility_words(),
 		  strap_words(),
 		  floating:words(),
 		  floating_ext:words()
@@ -73,8 +85,9 @@
 	 dpl = 0,
 	 csp = [],           %% compile control stack
 	 hsp = [],           %% hold area, stack!
+	 exceptions = [],    %% exception stack
 	 blk = 0,
-	 source_id = 0,      %% -1 = string, 0 = tty input, fid = file input
+	 source_id = ?TERMINAL_INPUT,      
 	 span = 0,
 	 hld = 0,
 	 latest = <<>>
@@ -92,7 +105,7 @@ compile(File) ->
 compile(Filename,Opt) ->
     init(),
     [0,Fd] = file_open(Filename, [raw,read,binary]),
-    set_user(#user.source_id, Fd),
+    set_source_id(Fd),
     try main([]) of 
 	[] -> 
 	    save(Filename,Opt);
@@ -241,7 +254,10 @@ save_word(Fd, _Current, _Unthread, W) -> %% literals etc
     emit_value(Fd, W).
 
 format_mfa(M,F,A) when is_atom(M), is_atom(F), is_integer(A) ->
-    [format_atom(A),":",format_atom(F),"/",format_int(A)].
+    [format_atom(M),":",format_atom(F),"/",format_int(A)];
+format_mfa(M,F,A) when is_atom(M), is_atom(F), is_list(A) ->
+    %% FIXME: format arguments
+    [format_atom(M),":",format_atom(F),"/",format_int(length(A))].
 
 format_int(X) ->
     integer_to_list(X).
@@ -336,22 +352,25 @@ show_word_(Fd, _Unthread, W) ->
     emit_char(Fd, ?SPACE),
     emit_value(Fd, W).
 
-%% setup test environment
 init() ->
     Args = [list_to_binary(Arg) || Arg <- init:get_plain_arguments()],
     Argv = list_to_tuple(Args),
     try ffe_tty:open() of
 	TTY ->
-	    put(user, #user { argv = ?WPTR(1,Argv),
-			      tty = TTY,
-			      source_id = ?TERMINAL_INPUT,
-			      altout = ?TERMINAL_OUTPUT })
+	    put(user, #user { 
+			 pad  = prim_buffer:new(),
+			 argv = ?WPTR(1,Argv),
+			 tty = TTY,
+			 source_id = ?TERMINAL_INPUT,
+			 altout = ?TERMINAL_OUTPUT })
     catch
 	error:einval ->  %% assume pipe/standard io
-	    put(user, #user { argv = ?WPTR(1,Argv),
-			      tty = undefined,
-			      source_id = ?STANDARD_INPUT,
-			      altout = ?STANDARD_OUTPUT })
+	    put(user, #user { 
+			 pad  = prim_buffer:new(),
+			 argv = ?WPTR(1,Argv),
+			 tty = undefined,
+			 source_id = ?STANDARD_INPUT,
+			 altout = ?STANDARD_OUTPUT })
     end,
     ok.
 
@@ -363,38 +382,64 @@ set_user(Field, Value) ->
     put(user, U),
     Value.
 
-get_state() -> get_user(#user.state).
-set_state(State) when is_integer(State) -> set_user(#user.state,State).
+get_state() -> 
+    get_user(#user.state).
+set_state(State) when is_integer(State) ->
+    set_user(#user.state,State).
 
-tib() -> get_user(#user.tib).
-tib(Data) when is_binary(Data) -> set_user(#user.tib, Data).
+get_tib() ->
+    get_user(#user.tib).
+set_tib(Data) when is_binary(Data) ->
+    set_user(#user.tib, Data).
+
+get_pad() ->
+    get_user(#user.pad).
+set_pad(Pad) when is_reference(Pad) ->
+    set_user(#user.pad, Pad).
     
-span() -> get_user(#user.span).
-span(Size) when is_integer(Size),Size>=0 -> set_user(#user.span,Size).
+get_span() ->
+    get_user(#user.span).
+set_span(Size) when is_integer(Size),Size>=0 -> 
+    set_user(#user.span,Size).
 
-in() -> get_user(#user.in).
-in(Offset) when is_integer(Offset),Offset>=0 -> set_user(#user.in, Offset).
+get_in() -> 
+    get_user(#user.in).
+set_in(Offset) when is_integer(Offset),Offset>=0 -> 
+    set_user(#user.in, Offset).
 
-get_out() -> get_user(#user.out).
-set_out(N) when is_integer(N),N>=0 -> set_user(#user.out, N).
+get_out() ->
+    get_user(#user.out).
+set_out(N) when is_integer(N),N>=0 -> 
+    set_user(#user.out, N).
 
-source_id() -> get_user(#user.source_id).
+get_source_id() -> 
+    get_user(#user.source_id).
+
+set_source_id(Fd) ->
+    set_user(#user.source_id, Fd).
 
 %% source is tib in> @
-source() -> {tib(),in()}.
-source(Data,Offset) -> tib(Data),in(Offset),span(byte_size(Data)).
+get_source() -> 
+    {get_in(),get_tib()}.
+set_source({In,Tib}) -> 
+    set_tib(Tib),
+    set_in(In),
+    set_span(byte_size(Tib)).
 
 altout() -> get_user(#user.altout).
 
 tty() -> get_user(#user.tty).
 
-get_base() -> get_user(#user.base).
+get_base() -> 
+    get_user(#user.base).
 set_base(Base) when is_integer(Base), Base > 1, Base =< 36 ->
     set_user(#user.base, Base).
 
 %% csp is a list of value (stack) in this implementation
-get_csp() -> get_user(#user.csp).
-set_csp(Stack) -> set_user(#user.csp,Stack).
+get_csp() ->
+    get_user(#user.csp).
+set_csp(Stack) ->
+    set_user(#user.csp,Stack).
 
 cf_push(Tag) ->  set_csp([Tag|get_csp()]).
 
@@ -485,14 +530,14 @@ call_(W, Args) ->
     CFA = ?cf(W),
     R = exec_ret(),
     put(user, #user {}),
-    CFA(lists:reverse(Args),[],?WPTR(4,R),?WPTR(4,W)).
+    CFA(lists:reverse(Args),[],?WPTR(?PFA,R),?WPTR(?PFA,W)).
 
 %% FIRST VERSION in Erlang - to validate the idea
 %% REWRITE in forth!
 %%
 quit0() ->
-    tib(<<>>), 
-    in(0),
+    set_tib(<<>>), 
+    set_in(0),
     set_state(0),
     main([]).
 
@@ -551,12 +596,16 @@ exec_ret(_SP,_RP,_IP,_WP) ->
 exec(W, SP) ->
     CFA = ?cf(W),
     R = exec_ret(),
-    try CFA(SP,[],?WPTR(4,R),?WPTR(4,W)) of
+    try CFA(SP,[],?WPTR(?PFA,R),?WPTR(?PFA,W)) of
 	SP1 -> main(SP1)
     catch
 	throw:{?BYE=_Code,_Reason} ->
 	    halt(0); %% ??
 	throw:{?QUIT=_Code,_Reason} ->
+	    quit0();
+	throw:{?ABORT=_Code,_Reason} ->
+	    quit0();
+	throw:{?ABORTQ=_Code,_Reason} ->
 	    quit0();
 	throw:{?UNDEF=Code,Reason} ->
 	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
@@ -580,6 +629,53 @@ exec(W, SP) ->
 	    quit0()
     end.
 
+?XT("evaluate",evaluate).
+evaluate([U,Addr|SP],RP,IP,WP) ->
+    <<String:U/binary, _/binary>> = Addr,
+    Source0 = get_source(),
+    State0  = get_state(),
+    SourceID0 = get_source_id(),
+    %% setup evaluation env
+    set_source_id(?STRING_INPUT),
+    set_source({0,String}),
+    set_state(0),
+    SP1 = main(SP),
+    set_source_id(SourceID0),
+    set_source(Source0),
+    set_state(State0),
+    next(SP1,RP,IP,WP).
+
+%% stub for return after exec
+cret() ->
+    {0,<<"(cret)">>,fun ?MODULE:cret/4,fun ?MODULE:ret/0}.
+cret(SP,_RP,_IP,_WP) ->
+    case get_user(#user.exceptions) of
+	[{_SP1,RP1,IP1,WP1}|Exceptions] ->
+	    set_user(#user.exceptions, Exceptions),
+	    next([0|SP],RP1,IP1,WP1)
+    end.
+
+?XT("catch", catch0).
+catch0([Xt|SP],RP,IP,WP) ->
+    Exceptions = get_user(#user.exceptions),
+    set_user(#user.exceptions, [{SP,RP,IP,WP}|Exceptions]),
+    W = Xt(),
+    CFA = ?cf(W),
+    R = cret(),
+    CFA(SP,RP,?WPTR(?PFA,R),?WPTR(?PFA,W)).
+
+?XT("throw", throw0).
+throw0([N|SP],RP,IP,WP) ->
+    if N =:= 0 ->
+	    next(SP,RP,IP,WP);
+       true ->
+	    case get_user(#user.exceptions) of
+		[{SP1,RP1,IP1,WP1}|Exceptions] ->
+		    set_user(#user.exceptions, Exceptions),
+		    next([N|SP1],RP1,IP1,WP1)
+	    end
+    end.
+
 dump_stacktrace(StackTrace) ->
     dump_stacktrace(StackTrace,?MAX_STACKTRACE_DEPTH).
 
@@ -587,7 +683,7 @@ dump_stacktrace(_StackTrace, 0) ->
     ffe_tio:output(?STANDARD_OUTPUT, ["  ...",?CRNL]),
     ok;
 dump_stacktrace([{ffe,Word,0,_}|Stack],Depth) ->
-    Msg = io_lib:format("~s", [Word]),
+    Msg = atom_to_list(Word),
     ffe_tio:output(?STANDARD_OUTPUT, ["  ",Msg,?CRNL]),
     dump_stacktrace(Stack, Depth-1);
 dump_stacktrace([{Mod,Fun,Arity,Location}|Stack],Depth) ->
@@ -599,7 +695,7 @@ dump_stacktrace([{Mod,Fun,Arity,Location}|Stack],Depth) ->
 		LineInfo = integer_to_list(Line),
 		[File,":",LineInfo," "]
 	end,
-    Msg = io_lib:format("~s~s:~s/~w", [Info,Mod,Fun,Arity]),
+    Msg = [Info, format_mfa(Mod,Fun,Arity)],
     ffe_tio:output(?STANDARD_OUTPUT, ["  ",Msg,?CRNL]),
     dump_stacktrace(Stack,Depth-1);
 dump_stacktrace([],_Depth) ->
@@ -655,25 +751,26 @@ word(Ch) ->
 parse(Ch) ->
     parse_(Ch,false).
 
-parse_(Ch,DoDrop) ->
-    In = in(),  %% >in @
-    case tib() of
+parse_(Ch,DoSkip) ->
+    In = get_in(),  %% >in @
+    T  = get_tib(),
+    case T of
 	Tib when In >= byte_size(Tib) ->
-	    case refill() of
-		eof -> eof;
-		_Count -> parse_(Ch,DoDrop)
+	    case refill_tib() of
+		false -> eof;
+		_Count -> parse_(Ch,DoSkip)
 	    end;
 	<<_:In/binary,Data/binary>> ->
-	    case enclose(Ch,Data,DoDrop) of
-		[_N1,0,0] when not DoDrop->
-		    in(In+1),
+	    case enclose(Ch,Data,DoSkip) of
+		[_N1,0,0] when not DoSkip->
+		    set_in(In+1),
 		    <<>>;
 		[_N1,N2,0] ->
-		    in(In+N2+1),
-		    parse_(Ch,DoDrop);
+		    set_in(In+N2+1),
+		    parse_(Ch,DoSkip);
 		[N1,N2,Len] ->
 		    <<_:N1/binary,Word:Len/binary,_/binary>> = Data,
-		    in(In+N2+1),
+		    set_in(In+N2+1),
 		    Word
 	    end
     end.
@@ -681,21 +778,68 @@ parse_(Ch,DoDrop) ->
 %% TIB  = line buffer
 %% SPAN = offset in line buffer
 char() ->
-    In = in(),  %% >in @
-    case tib() of
+    In = get_in(),  %% >in @
+    case get_tib() of
 	Tib when In >= byte_size(Tib) ->
-	    case refill() of
-		eof -> eof;
-		_Count -> char()
+	    case refill_tib() of
+		false -> eof;
+		true  -> char()
 	    end;
 	<<_:In/binary,Char,_/binary>> ->
-	    in(In+1),
+	    set_in(In+1),
 	    Char
     end.
 
+?XT("source", source).
+source(SP,RP,IP,WP) ->
+    T = get_tib(),
+    next([byte_size(T),T|SP],RP,IP,WP).
+
+?XT("refill", refill).
+refill(SP,RP,IP,WP) ->
+    R = refill_tib(),
+    next([?BOOL(R)|SP],RP,IP,WP).
+
+?XT("accept", accept).
+accept([N1,Buffer|SP],RP,IP,WP) ->
+    N2 = accept_buffer(Buffer,N1),
+    next([N2|SP],RP,IP,WP).
+
+?XT("pad", pad).
+pad(SP,RP,IP,WP) ->
+    Pad = get_pad(),
+    next([Pad|SP],RP,IP,WP).
+
+?XT("number", number).
+number([U,Buffer|SP],RP,IP,WP) ->
+    io:format("read ~w bytes from ~p\r\n", [U,Buffer]),
+    Data = prim_buffer:read(Buffer, U),
+    try binary_to_integer(Data) of
+	Int -> next([Int|SP],RP,IP,WP)
+    catch
+	error:_ ->
+	    throw({?ARGUMENT_MISMATCH, argument_mismatch})
+    end.
+
+?XT("save-input", save_input).
+save_input(SP,RP,IP,WP) ->
+    %% file position?
+    %% FIXME
+    next(SP,RP,IP,WP).
+
+?XT("restore-input", restore_input).
+restore_input(SP,RP,IP,WP) ->
+    %% file position?
+    %% FIXME
+    next(SP,RP,IP,WP).
+
 %% read a line and put it in TIB 
-refill() ->
-    SourceID = source_id(),
+refill_tib() ->
+    refill_tib(get_source_id()).
+
+refill_tib(?STRING_INPUT) ->
+    false;
+refill_tib(SourceID) ->
     ALTOUT = altout(),
     case is_compiling() of
 	false when SourceID =:= ?TERMINAL_INPUT, 
@@ -706,19 +850,32 @@ refill() ->
     end,
     case ffe_tio:get_line(SourceID) of
 	eof ->
-	    source(<<>>,0),
-	    eof;
+	    set_source({0, <<>>}),
+	    false;
 	Data ->
-	    set_out(0), %%? ok?
+	    set_out(0), %%? ok? or terminal only?
 	    Data1 = erlang:iolist_to_binary(Data),
-	    Sz1 = byte_size(Data1)-1,
-	    %% strip newline
-	    case Data1 of
-		<<Data2:Sz1/binary,$\n>> -> source(Data2,0);
-		Data2 -> source(Data2,0)
-	    end
+	    set_source({0, Data1}),
+	    true
     end.
 
+accept_buffer(Buffer, Max) ->
+    prim_buffer:wipe(Buffer),
+    accept_buffer_(get_source_id(),Buffer,Max).
+
+accept_buffer_(SourceID, Buffer, Max) ->
+    case ffe_tio:get_line(SourceID) of
+	eof -> 
+	    0;
+	Data when byte_size(Data) =< Max ->
+	    io:format("write data ~p to ~p\r\n", [[Data, <<"\s">>],Buffer]),
+	    prim_buffer:write(Buffer, [Data,<<"\s">>]),
+	    byte_size(Data);
+	<<Data:Max/binary,_/binary>> ->
+	    prim_buffer:write(Buffer, [Data,<<"\s">>]),
+	    Max
+    end.
+    
 expand(RevLine) ->
     %% match dictionary and collect all prefix matches
     Match = collect_until(RevLine, ?SPACE, []),
@@ -821,9 +978,9 @@ emit_counted_string(Fd, WordName, Width) ->
 %%  n1 = offset to first none ch char (word start)
 %%  n2 = offset to last char in word (word stop)
 %%  n3 = length of enclosed data
-enclose(Ch,Data,DoDrop) ->
+enclose(Ch,Data,DoSkip) ->
     Len = byte_size(Data),
-    N1 = if DoDrop -> drop(Ch, Data, 0); true -> 0 end,
+    N1 = if DoSkip -> skip(Ch, Data, 0); true -> 0 end,
     N2 = take(Ch, Data, N1),
     if N2 < Len -> [N1,N2,(N2-N1)];
        true -> [N1,N2,(N2-N1)]
@@ -834,11 +991,11 @@ match(C, C) -> true;
 match(?SPACE, ?TAB) -> true;
 match(_, _) ->  false.
 
-drop(Ch, Data, Offs) ->
+skip(Ch, Data, Offs) ->
     case Data of
 	<<_:Offs/binary,C,_/binary>> ->
 	    case match(Ch,C) of
-		true -> drop(Ch,Data,Offs+1);
+		true -> skip(Ch,Data,Offs+1);
 		false -> Offs
 	    end;
 	_ -> Offs
@@ -896,9 +1053,6 @@ internal_words() ->
       ?WORD("1",          one),
       ?WORD("-1",         minus_one),
       
-      %% system 
-      ?WORD("bye",        bye),
-      
       ?WORD("create",     create),
       ?WORD("does>",      does),
       
@@ -920,8 +1074,20 @@ internal_words() ->
       ?WORD("(lit)",      lit),
       ?WORD("literal",    literal),
       ?WORD("\"",         string),
+      ?WORD("s\"",        s_quote),
 
       ?WORD("char",       care),
+
+      ?WORD("refill",     refill),
+      ?WORD("source",     source),
+      ?WORD("environment?", environment_query),
+      ?WORD("pad",        pad),
+      ?WORD("accept",     accept),
+      ?WORD("number",     number),
+      ?WORD("evaluate",   evaluate),
+      ?WORD("catch",      catch0),
+      ?WORD("throw",      throw0),
+
       %% Utils - will be strapped later
 
       ?WORD("remove",     remove_word),
@@ -937,8 +1103,7 @@ next(SP,RP,?WPTR(IP,Code),?WPTR(_WP,_W)) ->
     PF = element(IP, Code),  %% code parameter 
     W = PF(),                %% tuple word
     CFA = ?cf(W),            %% read CFA
-    PFA1 = ?WPTR(4,W),       %% point to first "parameter"
-    CFA(SP,RP,?WPTR(IP+1,Code),PFA1).
+    CFA(SP,RP,?WPTR(IP+1,Code),?WPTR(?PFA,W)).
 
 add_addr(?WPTR(Y,W), X) when is_integer(X) -> ?WPTR(Y+X,W);
 add_addr(Y, X) when is_integer(Y) -> Y+X.
@@ -1161,8 +1326,9 @@ ploop(SP,[I|RP=[N|RP1]],?WPTR(IP,Code),WP) ->
 %%base(SP,RP,IP,Code) ->
 %%    next([{user,#user.base}|SP],RP,IP,Code).
 ?XUSR("base", base, #user.base).
-
 ?XUSR("argv", argv, #user.argv).
+?XUSR(">in", to_in, #user.in).
+
 
 ?XT("to", to).
 to([Value|SP],RP,IP,Code) ->
@@ -1180,11 +1346,7 @@ to([Value|SP],RP,IP,Code) ->
 leave(SP,[_,RP=[Limit|_]],IP,WP) ->
     next(SP,[Limit|RP],IP,WP).
 
-?XT("bye", bye).
-bye(_SP,_RP,_IP,_WP) ->
-    throw({?BYE, exit}).
-
-?XT("ref", ret).
+?XT("ret", ret).
 ret(SP,_RP,_IP,_Code) ->
     SP.
 
@@ -1282,7 +1444,7 @@ zbranch() ->
 zbranch([0|SP],RP,?WPTR(IP,Code),WP) ->
     Offset = element(IP,Code),
     next(SP,RP,?WPTR(IP+Offset,Code),WP);
-zbranch([_|SP],RP,{IP,Code},WP) ->
+zbranch([_|SP],RP,?WPTR(IP,Code),WP) ->
     next(SP,RP,?WPTR(IP+1,Code),WP).
 
 %% char
@@ -1294,17 +1456,17 @@ care(SP,RP,IP,WP) ->
 
 ?IXT("\\", backslash).
 backslash(SP,RP,IP,WP) ->
-    in(span()),  %% skip all characters in input buffer
+    set_in(get_span()),  %% skip all characters in input buffer
     next(SP,RP,IP,WP).
 
 ?IXT("(", paren). 
 paren(SP,RP,IP,WP) ->
-    word($)),       %% skip until ')'
+    parse($)),       %% skip until ')'
     next(SP,RP,IP,WP).
 
 ?IXT("\"", string).
 string(SP,RP,IP,WP) ->
-    String = word($"),
+    String = parse($"),
     case is_compiling() of
 	true ->
 	    comma_(fun ffe:lit/0),
@@ -1312,6 +1474,20 @@ string(SP,RP,IP,WP) ->
 	    next(SP,RP,IP,WP);
 	false ->
 	    next([String|SP],RP,IP,WP)
+    end.
+
+?IXT("s\"", s_quote).
+s_quote(SP,RP,IP,WP) ->
+    String = parse($"),
+    case is_compiling() of
+	true ->
+	    comma_(fun ffe:lit/0),
+	    comma_(String),
+	    comma_(fun ffe:lit/0),
+	    comma_(byte_size(String)),
+	    next(SP,RP,IP,WP);
+	false ->
+	    next([byte_size(String),String|SP],RP,IP,WP)
     end.
 
 %% output a word as erlang code - fixme only allow colon defs!
@@ -1462,14 +1638,15 @@ collect_line([C|Cs], N, Acc) ->
 collect_line([], N, Acc) ->
     {false, N, lists:reverse(Acc), []}.
 
-
 -include("core.i").
 -include("core_ext.i").
 -include("common.i").
 %%-include("search.i").
+%%-include("string.i").
 -include("tools.i").
-%%-include("tools_ext.i").
+-include("tools_ext.i").
 -include("file.i").
+-include("facility.i").
 
 -ifdef(INCLUDE_STRAP).
 -include("strap.i").
@@ -1481,3 +1658,116 @@ strap_words() ->
 ?XCON("0", zero, 0).
 ?XCON("1", one,  1).
 ?XCON("-1", minus_one,  -1).
+
+-ifdef(__CORE__).
+-define(CORE_PRESENT, ?TRUE).
+-else.
+-define(CORE_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__CORE_EXT__).
+-define(CORE_EXT_PRESENT, ?TRUE).
+-else.
+-define(CORE_EXT_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__SEARCH__).
+-define(SEARCH_PRESENT, ?TRUE).
+-else.
+-define(SEARCH_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__STRING__).
+-define(STRING_PRESENT, ?TRUE).
+-else.
+-define(STRING_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__TOOLS__).
+-define(TOOLS_PRESENT, ?TRUE).
+-else.
+-define(TOOLS_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__TOOLS_EXT__).
+-define(TOOLS_EXT_PRESENT, ?TRUE).
+-else.
+-define(TOOLS_EXT_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__FILE__).
+-define(FILE_PRESENT, ?TRUE).
+-else.
+-define(FILE_PRESENT, ?FALSE).
+-endif.
+
+-ifdef(__FACILITY__).
+-define(FACILITY_PRESENT, ?TRUE).
+-else.
+-define(FACILITY_PRESENT, ?FALSE).
+-endif.
+
+has(M,F) ->
+    case erlang:function_exported(M,F,0) of
+	true ->
+	    DoCon = fun ffe:docon/4,
+	    try M:F() of
+		{_Flags,_Name, DoCon, V} -> V;
+		_ -> ?FALSE
+	    catch
+		error:_ ->
+		    ?FALSE
+	    end;
+	false ->
+	    ?FALSE
+    end.
+
+?XT("environment?", environment_query).
+environment_query([U,CAddr|SP],RP,IP,WP) ->    
+    <<String:U/binary,_/binary>> = CAddr,
+    case environment_lookup(String) of
+	undefined ->
+	    next([?FALSE|SP],RP,IP,WP);
+	Value ->
+	    next([?TRUE,Value|SP],RP,IP,WP)
+    end.
+
+environment_lookup(String) ->
+    case String of
+	<<"/counted-string">> -> 65535;
+	<<"/hold">> -> 135;
+	<<"/pad">> -> 1024;
+	<<"block">> -> ?FALSE;
+	<<"block-ext">> -> ?FALSE;
+	<<"core">> -> ?CORE_PRESENT;
+	<<"core-ext">> -> ?CORE_EXT_PRESENT;
+	<<"double">> -> ?FALSE;
+	<<"double-ext">> -> ?FALSE;
+	<<"exception">> -> ?FALSE;
+	<<"exception-ext">> -> ?FALSE;
+	<<"facility">> -> ?FACILITY_PRESENT;
+	<<"facility-ext">> -> ?TRUE;
+	<<"file">> -> ?FILE_PRESENT;
+	<<"file-ext">> -> ?TRUE;
+	<<"floating">> -> has(floating, has_floating);
+	<<"floating-ext">> -> has(floating_ext, has_floating_ext);
+	<<"floating-stack">> -> has(floating, has_floating_stack);
+	<<"floored">> -> ?TRUE;  %% fixme
+	<<"max-char">> -> 255;
+	<<"max-d">> -> (1 bsl 1023);
+	<<"max-float">> -> 3.14;
+	<<"max-n">> -> (1 bsl 511);
+	<<"max-u">> -> (1 bsl 512)-1;
+	<<"max-ud">> -> (1 bsl 1024);
+	<<"memory-alloc">> -> ?FALSE;
+	<<"return-stack-cells">> -> 4096;
+	<<"stack-cells">> -> 4096;
+	<<"search-order">> -> ?FALSE;
+	<<"search-order-ext">> -> ?FALSE;
+	<<"string">> -> ?STRING_PRESENT;
+	<<"tools">> -> ?TOOLS_PRESENT;
+	<<"tools-ext">> -> ?TOOLS_EXT_PRESENT;
+	<<"wordlists">> -> 100;
+	_ -> undefined
+    end.
+
