@@ -41,6 +41,7 @@ bracket_skip() ->
     ELSE = fun ?MODULE:bracket_else/0,
     bracket_skip_(IF, THEN, ELSE, []).
 
+%% FIXME: handle string words!!!
 bracket_skip_(IF, THEN, ELSE, Stack) ->
     case word(?SPACE) of
 	eof -> eof;

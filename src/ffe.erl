@@ -47,10 +47,6 @@
 
 -define(CF_CREATE, 100).
 
--define(IF,   1).
--define(ELSE, 2).
--define(THEN, 4).
-
 -define(UNTHREAD_NONE, 0).
 -define(UNTHREAD_ALL, 1000000).
 
@@ -283,6 +279,7 @@ need_quote_([C|Cs]) ->
        C >= $a, C =< $z -> need_quote_(Cs);
        C >= $A, C =< $Z -> need_quote_(Cs);
        C =:= $@ -> need_quote_(Cs);
+       C =:= $_ -> need_quote_(Cs);
        true -> true
     end;
 need_quote_([]) ->
@@ -816,7 +813,6 @@ pad(SP,RP,IP,WP) ->
 
 ?XT("number", number).
 number([U,Buffer|SP],RP,IP,WP) ->
-    io:format("read ~w bytes from ~p\r\n", [U,Buffer]),
     Data = prim_buffer:read(Buffer, U),
     try binary_to_integer(Data) of
 	Int -> next([Int|SP],RP,IP,WP)
@@ -1065,7 +1061,9 @@ internal_words() ->
       ?WORD("variable",   compile_variable),
       ?WORD("value",      compile_value),
       ?WORD("user",       compile_user),
+      ?WORD("defer",      compile_defer),
       ?WORD("to",         to),
+      ?WORD("is",         is),
       ?WORD("do",         compile_do),
       ?WORD("?do",        compile_qdo),
       ?WORD("loop",       compile_loop),
@@ -1176,6 +1174,27 @@ compile_value([Value|SP],RP,IP,WP) ->
     Def = {0, Name, fun ?MODULE:doval/4, Var },
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
+
+%% DEFER
+?XT("defer", compile_defer).
+compile_defer(SP,RP,IP,WP) ->
+    Name = word(?SPACE),
+    Var = make_variable_ref(),
+    Def = {0, Name, fun ?MODULE:doexec/4, Var },
+    define(Name, fun() -> Def end),
+    next(SP,RP,IP,WP).
+
+?XT("is", is).
+is([Xt|SP],RP,IP,Code) ->
+    Name = word(?SPACE),
+    case find_word_(Name) of
+	{_, Yt} ->
+	    Var = element(?PFA, Yt()),
+	    set_value(Var, Xt),
+	    next(SP,RP,IP,Code);
+	false ->
+	    throw({?UNDEF, Name})
+    end.
 
 make_variable_ref() ->
     {var, erlang:unique_integer([])}.
@@ -1370,8 +1389,7 @@ literal(SP,RP,IP,WP) ->
     comma_(X),
     next(SP1,RP,IP,WP).
 
-execut() ->
-    { 0, <<"execut">>, fun ffe:execut/4 }.
+?XT("execut", execut).
 execut([Xt|SP],RP,IP,_WP) ->
     W = Xt(),            %% tuple word
     CFA = ?cf(W),        %% get code field
@@ -1389,25 +1407,32 @@ docol() ->
 docol(SP,RP,IP,WP) ->
     next(SP,[IP|RP],WP,WP).
 
-docon() ->
-    { 0, <<"(docon)">>, fun ffe:docon/4 }.
+?XT("(docon)", docon).
 docon(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([element(W,WP)|SP],RP,IP,WP0).
 
-dousr() ->
-    { 0, "(dousr)", fun ffe:dousr/4 }.
+?XT("(dousr)", dousr).
 dousr(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([{user,element(W,WP)}|SP],RP,IP,WP0).
 
-dovar() ->
-    { 0, <<"(dovar)">>, fun ffe:dovar/4 }.
+?XT("(dovar)", dovar).
 dovar(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([element(W,WP)|SP],RP,IP,WP0).
 
-doval() ->
-    { 0, <<"(doval)">>, fun ffe:doval/4 }.
+?XT("(doval)", doval).
 doval(SP,RP,IP,WP0=?WPTR(W,WP)) ->
     next([get_value(element(W,WP))|SP],RP,IP,WP0).
+
+?XT("(doexec)", doexec).
+doexec(SP,RP,IP,WP0=?WPTR(Wi,WP)) ->
+    case get_value(element(Wi,WP)) of
+	0 ->
+	    next(SP,RP,IP,WP0);
+	Xt ->
+	    W = Xt(),            %% tuple word
+	    CFA = ?cf(W),        %% get code field
+	    CFA(SP,RP,IP,?WPTR(?PFA,W))
+    end.
 
 %% default does code with no offset
 does0(SP,RP,?WPTR(IP,Code),WP=?WPTR(Pos,Wf)) ->
@@ -1711,20 +1736,23 @@ strap_words() ->
 -define(FACILITY_PRESENT, ?FALSE).
 -endif.
 
-has(M,F) ->
+value(M,F,Default) ->
     case erlang:function_exported(M,F,0) of
 	true ->
 	    DoCon = fun ffe:docon/4,
 	    try M:F() of
 		{_Flags,_Name, DoCon, V} -> V;
-		_ -> ?FALSE
+		_ -> Default
 	    catch
 		error:_ ->
-		    ?FALSE
+		    Default
 	    end;
 	false ->
-	    ?FALSE
+	    Default
     end.
+
+has(M,F) ->
+    value(M,F,?FALSE).
 
 ?XT("environment?", environment_query).
 environment_query([U,CAddr|SP],RP,IP,WP) ->    
@@ -1759,7 +1787,7 @@ environment_lookup(String) ->
 	<<"floored">> -> ?TRUE;  %% fixme
 	<<"max-char">> -> 255;
 	<<"max-d">> -> (1 bsl 1023);
-	<<"max-float">> -> 3.14;
+	<<"max-float">> -> value(floating, max_float, 0.0);
 	<<"max-n">> -> (1 bsl 511);
 	<<"max-u">> -> (1 bsl 512)-1;
 	<<"max-ud">> -> (1 bsl 1024);

@@ -43,6 +43,7 @@
 
 -define(FFE_TTY_INPUT, ffe_tty_input).
 -define(FFE_KILL_BUFFER, ffe_kill_buffer).
+-define(FFE_HISTORY, ffe_history).
 
 %% FIXME: how do we steel tty_sl without fuzz?
 open() ->
@@ -155,14 +156,6 @@ translate_keys([C|Cs]) ->
 translate_keys([]) ->
     [].
 
--define(CTRL_A, $\^a).  %% beginning of line
--define(CTRL_B, $\^b).  %% backward char
--define(CTRL_D, $\^d).  %% delete char
--define(CTRL_E, $\^e).  %% end of line
--define(CTRL_F, $\^f).  %% forward char
--define(CTRL_K, $\^k).  %% kill (cut) until end of line
--define(CTRL_P, $\^p).  %% previous line
--define(CTRL_Y, $\^y).  %% yank(insert) from kill buffer
 -define(BACKSPACE, 127).
 
 %% {esc,$b} - backward word
@@ -177,7 +170,20 @@ get_line(Port, After, Before) ->
 	eof -> eof;
 	$\r ->
 	    output(Port, [$\s]),
-	    list_to_binary(lists:reverse(Before) ++ After);
+	    Line = list_to_binary(lists:reverse(Before)++After),
+	    case is_blank_line(Line) of
+		true ->
+		    Line;
+		false ->
+		    case get(?FFE_HISTORY) of
+			undefined ->
+			    put(?FFE_HISTORY, {[{After,Before}],[]});
+			{Above,Beneath} ->
+			    Hist=[{After,Before}|lists:reverse(Beneath,Above)],
+			    put(?FFE_HISTORY,{Hist,[]})
+		    end
+	    end,
+	    Line;
 	$\t ->
 	    %% FIXME: expand_fun!
 	    {Silent,Insert,Expand} = ffe:expand(Before),
@@ -199,20 +205,24 @@ get_line(Port, After, Before) ->
 	    get_line_bs(Port, After, Before);
 	?BACKSPACE ->
 	    get_line_bs(Port, After, Before);
-	?CTRL_A ->
+	$\^a ->
 	    get_line_beginning_of_line(Port, After, Before);
-	?CTRL_B ->
+	$\^b ->
 	    get_line_backward_char(Port, After, Before);
-	?CTRL_D ->
+	$\^d ->
 	    get_line_delete_char(Port, After, Before);
-	?CTRL_E ->
+	$\^e ->
 	    get_line_end_of_line(Port, After, Before);
-	?CTRL_F ->
+	$\^f ->
 	    get_line_forward_char(Port, After, Before);
-	?CTRL_K ->
+	$\^k ->
 	    get_line_kill_to_end_of_line(Port, After, Before);
-	?CTRL_Y ->
+	$\^y ->
 	    get_line_insert_from_kill_buffer(Port, After, Before);
+	$\^p -> 
+	    get_line_previous_line(Port, After, Before);
+	$\^n -> 
+	    get_line_next_line(Port, After, Before);	
 	left ->
 	    get_line_backward_char(Port, After, Before);
 	right ->
@@ -222,18 +232,23 @@ get_line(Port, After, Before) ->
 	    get_line(Port, After, [Key|Before]);
 	_Key ->
 	    beep(Port),
-	    %% io:format("char ~p\n", [Key]),
 	    get_line(Port, After, Before)
     end.
 
+is_blank_line(<<$\s,Cs/binary>>) -> is_blank_line(Cs);
+is_blank_line(<<$\t,Cs/binary>>) -> is_blank_line(Cs);
+is_blank_line(<<>>) -> true;
+is_blank_line(_) -> false.
+    
+
 get_line_delete_char(Port, After, Before) ->
-    case Before of
+    case After of
 	[] ->
-	    io:beep(Port), %% option?
+	    beep(Port), %% option?
 	    get_line(Port, After, Before);
-	[_|Before1] ->
-	    delete(Port, -1),
-	    get_line(Port, After, Before1)
+	[_|After1] ->
+	    delete(Port, 1),
+	    get_line(Port, After1, Before)
     end.
 
 get_line_backward_char(Port, After, Before) ->
@@ -306,3 +321,39 @@ get_line_insert_from_kill_buffer(Port, After, Before) ->
 	    get_line(Port, After, lists:reverse(Yank, Before))
     end.
 
+get_line_previous_line(Port, After, Before) ->
+    case get(?FFE_HISTORY) of
+	undefined ->
+	    beep(Port),
+	    get_line(Port, After, Before);
+	{[],_} ->
+	    beep(Port),
+	    get_line(Port, After, Before);
+	{[{A,B}|Above],Beneath} ->
+	    move(Port, -length(Before)),
+	    delete(Port, length(After)+length(Before)),
+	    put(?FFE_HISTORY, {Above, [{A,B}|Beneath]}),
+	    insert(Port, lists:reverse(B)),
+	    insert(Port, A),
+	    move(Port, -length(A)),
+	    get_line(Port, A, B)
+    end.
+    
+
+get_line_next_line(Port, After, Before) ->
+    case get(?FFE_HISTORY) of
+	undefined ->
+	    beep(Port),
+	    get_line(Port, After, Before);
+	{_,[]} ->
+	    beep(Port),
+	    get_line(Port, After, Before);
+	{Above,[{A,B}|Beneath]} ->
+	    move(Port, -length(Before)),
+	    delete(Port, length(After)+length(Before)),
+	    put(?FFE_HISTORY, {[{A,B}|Above], Beneath}),
+	    insert(Port, lists:reverse(B)),
+	    insert(Port, A),
+	    move(Port, -length(A)),
+	    get_line(Port, A, B)
+    end.

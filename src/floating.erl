@@ -34,9 +34,11 @@
 ?EXPORT('f<').
 ?XPORT(has_floating).
 ?XPORT(has_floating_stack).
+?XPORT(max_float).
 
 ?XCON("has-floating", has_floating, ?TRUE).
 ?XCON("has-floating-stack", has_floating_stack, ?FALSE).
+?XCON("max-float", max_float, 1.797693e+308).
 
 -define(next(SP,RP,IP,WP), ffe:next((SP),(RP),(IP),(WP))).
 
