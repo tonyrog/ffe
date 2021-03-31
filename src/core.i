@@ -56,7 +56,6 @@ core_words() ->
        ?WORD("abort",      abort),
        ?WORD("abort\"",    abort_quote),
        ?WORD("and",        'and'),
-       ?WORD("arshift",    arshift),
        ?WORD("bl",         bl),
        ?WORD("count",      count),
        ?WORD("cr",         cr),
@@ -269,7 +268,7 @@ colon(SP, RP, IP, WP) ->
     cf_reset(),
     set_state(?COMPILE),
     Name = word($\s),
-    here({0,Name,fun ffe:docol/4}),
+    here(create_word(Name,fun ffe:docol/4)),
     next(SP, RP, IP, WP).
 
 ?IXT(";", semicolon).
@@ -319,7 +318,7 @@ left_bracket(SP,RP,IP,WP) ->
 ?IXT("[char]", bracket_care).
 bracket_care(SP,RP,IP,WP) ->
     compile_only(),
-    Char = char(),
+    Char = char_(),
     comma_(fun ?MODULE:lit/0),
     comma_(Char),
     next(SP,RP,IP,WP).
@@ -468,13 +467,6 @@ lshift(SP,RP,IP,WP) ->
 rshift(SP,RP,IP,WP) ->
     [B,A|SP1] = SP,
     next([A bsr B|SP1],RP,IP,WP).    
-
-
-arshift() ->
-    { 0, <<"arshift">>, fun ?MODULE:arshift/4 }.
-arshift(SP,RP,IP,WP) ->
-    [B,A|SP1] = SP,
-    next([A bsr B|SP1],RP,IP,WP).
 
 ?XT(bl).
 bl(SP,RP,IP,WP) -> 

@@ -17,7 +17,7 @@
 
 %%
 %% Forth word layout:
-%% { Flags :: smudge | immediate
+%% { Flags :: ?SMUDGE | ?IMMEDIATE
 %%   Name  :: binary()
 %%   CFA   :: function/4
 %%   PF1   :: function/0 | term
@@ -35,22 +35,28 @@
 -define(cf(W), element(?CFA,(W))).        %% code field :: fun/4
 -define(pf(I,W), element((?PFA-1)+(I),(W))). %% 1..n parameter field :: fun/0|term() 
 
--define(set_ff(W, Flags), setelement(1, (W), (Flags))).
--define(set_nf(W, Name), setelement(2, (W), (Name))).
--define(set_cf(W, Code), setelement(3, (W), (Code))).
--define(set_pf(I,W,Param), setelement(3+(I), (W), (Param))).
+-define(set_ff(W, Flags), setelement(?FFA, (W), (Flags))).
+-define(set_nf(W, Name), setelement(?NFA, (W), (Name))).
+-define(set_cf(W, Code), setelement(?CFA, (W), (Code))).
+-define(set_pf(I,W,Param), setelement(?PFA+(I)-1, (W), (Param))). %% I=1...
 
 -define(name_len(Addr), byte_size((Addr))).
+
+-define(CREATE_WORD(Name,CFA), {0, (Name), (CFA)}).
+-define(CREATE_WORD(Name,CFA,PFA1), {0, (Name), (CFA), (PFA1)}).
+
+-define(CREATE_IMM(Name,CFA), {?IMMEDIATE, (Name), (CFA)}).
+-define(CREATE_IMM(Name,CFA,PFA1), {?IMMEDIATE, (Name), (CFA), (PFA1)}).
 
 -define(XPORT(W), -export([W/0])).
 -define(EXPORT(W), -export([W/0, W/4])).
 -define(WORD(W,Xt), <<W>> => fun ?MODULE:Xt/0).
--define(XT(W), W() -> {0, <<??W>>, fun ?MODULE:W/4 }).
--define(XT(Nm,Cf), Cf() -> {0, <<Nm>>, fun ?MODULE:Cf/4 }).
--define(IXT(W),      W() -> {?IMMEDIATE, <<??W>>, fun ?MODULE:W/4 }).
--define(IXT(Nm,Cf), Cf() -> {?IMMEDIATE, <<Nm>>, fun ?MODULE:Cf/4 }).
--define(XCON(Nm,Fn,V), Fn() -> {0, <<Nm>>, fun ffe:docon/4, (V) }).
--define(XUSR(Nm,Fn,V), Fn() -> {0, <<Nm>>, fun ffe:dousr/4, (V) }).
+-define(XT(W), W() -> ?CREATE_WORD(<<??W>>, fun ?MODULE:W/4)).
+-define(XT(Nm,Cf), Cf() -> ?CREATE_WORD(<<Nm>>, fun ?MODULE:Cf/4)).
+-define(IXT(W),      W() -> ?CREATE_IMM(<<??W>>, fun ?MODULE:W/4)).
+-define(IXT(Nm,Cf), Cf() -> ?CREATE_IMM(<<Nm>>, fun ?MODULE:Cf/4)).
+-define(XCON(Nm,Fn,V), Fn() -> ?CREATE_WORD(<<Nm>>, fun ffe:docon/4, (V))).
+-define(XUSR(Nm,Fn,V), Fn() -> ?CREATE_WORD(<<Nm>>, fun ffe:dousr/4, (V))).
 
 -define(TRUE, -1).
 -define(FALSE, 0).
@@ -80,8 +86,10 @@
 -define(NL,    $\n).
 -define(CRNL,  $\r,$\n).
 -define(TILDE, $~).
+-define(BL,    $\s).
 -define(SPACE, $\s).
 -define(ESCAPE, $\e).
 -define(BS, $\b).
+-define(Q, $\").
 
 -endif.

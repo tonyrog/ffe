@@ -56,7 +56,7 @@
 
 -record(user,
 	{
-	 tib = <<>>,       %% text input buffer
+	 tib :: undefined | prim_buffer(),  %% text input buffer
 	 pad :: undefined | prim_buffer(),  %% scratch input buffer
 	 width = 0,   %% max width of word (fix me not used)
 	 dp = {},     %% data pointer (fixme)
@@ -90,7 +90,7 @@
 	 source_id = ?TERMINAL_INPUT,      
 	 span = 0,
 	 hld = 0,
-	 latest = <<>>
+	 latest = <<>>       %% latest word defined
 	}).
 
 start() ->
@@ -360,6 +360,7 @@ init() ->
     try ffe_tty:open() of
 	TTY ->
 	    put(user, #user { 
+			 tib  = prim_buffer:new(),
 			 pad  = prim_buffer:new(),
 			 argv = ?WPTR(1,Argv),
 			 tty = TTY,
@@ -368,6 +369,7 @@ init() ->
     catch
 	error:einval ->  %% assume pipe/standard io
 	    put(user, #user { 
+			 tib  = prim_buffer:new(),			 
 			 pad  = prim_buffer:new(),
 			 argv = ?WPTR(1,Argv),
 			 tty = undefined,
@@ -389,25 +391,32 @@ get_state() ->
 set_state(State) when is_integer(State) ->
     set_user(#user.state,State).
 
+-spec get_tib() -> prim_buffer().
 get_tib() ->
     get_user(#user.tib).
-set_tib(Data) when is_binary(Data) ->
-    set_user(#user.tib, Data).
+-spec set_tib(Tib::prim_buffer()) -> prim_buffer().
+set_tib(Tib) when is_reference(Tib) ->
+    set_user(#user.tib, Tib).
 
+-spec get_pad() -> prim_buffer().
 get_pad() ->
     get_user(#user.pad).
+-spec set_pad(Pad::prim_buffer()) -> prim_buffer().
 set_pad(Pad) when is_reference(Pad) ->
     set_user(#user.pad, Pad).
     
 get_span() ->
-    get_user(#user.span).
-set_span(Size) when is_integer(Size),Size>=0 -> 
-    set_user(#user.span,Size).
+    prim_buffer:size(get_tib()).
+%% get_user(#user.span).
+%%set_span(Size) when is_integer(Size),Size>=0 -> 
+%%    set_user(#user.span,Size).
 
-get_in() -> 
-    get_user(#user.in).
+get_in() ->
+    0.
+%%    get_user(#user.in).
 set_in(Offset) when is_integer(Offset),Offset>=0 -> 
-    set_user(#user.in, Offset).
+    prim_buffer:skip(get_tib(), Offset).
+%%    set_user(#user.in, Offset).
 
 get_out() ->
     get_user(#user.out).
@@ -422,11 +431,18 @@ set_source_id(Fd) ->
 
 %% source is tib in> @
 get_source() -> 
-    {get_in(),get_tib()}.
-set_source({In,Tib}) -> 
-    set_tib(Tib),
-    set_in(In),
-    set_span(byte_size(Tib)).
+    get_tib().
+set_source(String) ->
+    Tib = get_tib(),
+    prim_buffer:wipe(Tib),
+    prim_buffer:write(Tib, [String]).
+clr_source() ->
+    prim_buffer:wipe(get_tib()).
+
+make_source(String) when is_binary(String) ->
+    B = prim_buffer:new(),
+    prim_buffer:write(B, [String]),
+    B.
 
 altout() -> get_user(#user.altout).
 
@@ -518,9 +534,13 @@ get_value(Var) ->
 set_value(Var, Value) ->
     set_variables(maps:put(Var, Value, get_variables())).
 
+set_latest(Name) when is_binary(Name) ->
+    set_user(#user.latest, Name).
+
 %% Add Name to current vocabulary
-define(Name,W) ->
-    current(maps:put(Name,W,current())).
+define(Name,Xt) when is_function(Xt,0) ->
+    set_latest(Name),
+    current(maps:put(Name,Xt,current())).
 
 %% Call FFE from erlang
 call(Xt, Args) when is_function(Xt,0), is_list(Args) ->
@@ -538,8 +558,7 @@ call_(W, Args) ->
 %% REWRITE in forth!
 %%
 quit0() ->
-    set_tib(<<>>), 
-    set_in(0),
+    clr_source(),  %% clear text input buffer
     set_state(0),
     main([]).
 
@@ -588,9 +607,20 @@ to_integer(<<$$,Cs/binary>>, _Base) ->
 to_integer(Cs, Base) ->
     binary_to_integer(Cs, Base).
 
+create_word(Name,CFA) when is_binary(Name),
+				is_function(CFA,4) ->
+    ?CREATE_WORD(Name, CFA).
+create_word(Name,CFA,PFA1) when is_binary(Name),
+				is_function(CFA,4) ->
+    ?CREATE_WORD(Name, CFA, PFA1).
+
+create_imm(Name,CFA,PFA1) when is_binary(Name),
+			       is_function(CFA,4) ->
+    ?CREATE_IMM(Name, CFA, PFA1).
+
 %% stub for return after exec
 exec_ret() ->
-    {0,<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0}.
+    ?CREATE_WORD(<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0).
 exec_ret(_SP,_RP,_IP,_WP) ->
     erlang:display("INTERNAL ERROR\n"),
     throw({?QUIT, quit}).
@@ -634,16 +664,16 @@ exec(W, SP) ->
 ?XT("evaluate",evaluate).
 evaluate([U,Addr|SP],RP,IP,WP) ->
     <<String:U/binary, _/binary>> = Addr,
-    Source0 = get_source(),
+    Tib0 = get_tib(),
     State0  = get_state(),
     SourceID0 = get_source_id(),
     %% setup evaluation env
     set_source_id(?STRING_INPUT),
-    set_source({0,String}),
+    set_source(make_source(String)),
     set_state(0),
     SP1 = main(SP),
     set_source_id(SourceID0),
-    set_source(Source0),
+    set_tib(Tib0),
     set_state(State0),
     next(SP1,RP,IP,WP).
 
@@ -746,56 +776,61 @@ lookup_word_(Name, [Dict|Ds]) ->
 lookup_word_(_Name, []) ->
     error.
 
+
+
+			    
 %% TIB  = line buffer
 %% SPAN = offset in line buffer
-word(Ch) ->
-    parse_(Ch,true).
-parse(Ch) ->
-    parse_(Ch,false).
+word(C) ->
+    parse_(C,true).
+parse(C) ->
+    parse_(C,false).
 
-parse_(Ch,DoSkip) ->
-    In = get_in(),  %% >in @
-    T  = get_tib(),
-    case T of
-	Tib when In >= byte_size(Tib) ->
-	    case refill_tib() of
-		false -> eof;
-		_Count -> parse_(Ch,DoSkip)
-	    end;
-	<<_:In/binary,Data/binary>> ->
-	    case enclose(Ch,Data,DoSkip) of
-		[_N1,0,0] when not DoSkip->
-		    set_in(In+1),
-		    <<>>;
-		[_N1,N2,0] ->
-		    set_in(In+N2+1),
-		    parse_(Ch,DoSkip);
-		[N1,N2,Len] ->
-		    <<_:N1/binary,Word:Len/binary,_/binary>> = Data,
-		    set_in(In+N2+1),
-		    Word
+parse_(C, DoSkip) ->
+    parse_(get_tib(), C, DoSkip).
+
+parse_(Buffer, C, DoSkip) ->
+    case prim_buffer:find_byte_index(Buffer, C) of
+	{ok,0} when DoSkip ->
+	    prim_buffer:skip(Buffer, 1),
+	    parse_(Buffer, C, DoSkip);
+	{ok,N} ->
+	    Result = prim_buffer:read(Buffer, N),
+	    prim_buffer:skip(Buffer, 1), %% skip C character
+	    Result;
+	not_found ->
+	    case prim_buffer:size(Buffer) of
+		0 ->
+		    case refill(Buffer, get_source_id()) of
+			false -> eof;
+			true -> parse_(Buffer, C, DoSkip)
+		    end;
+		N ->
+		    prim_buffer:read(Buffer, N)
 	    end
     end.
 
-%% TIB  = line buffer
-%% SPAN = offset in line buffer
-char() ->
-    In = get_in(),  %% >in @
-    case get_tib() of
-	Tib when In >= byte_size(Tib) ->
-	    case refill_tib() of
+char_() ->
+    char_(get_tib()).
+
+char_(Buffer) ->
+    case prim_buffer:size(Buffer) of
+	0 ->
+	    case refill(Buffer, get_source_id()) of
 		false -> eof;
-		true  -> char()
+		true -> char_(Buffer)
 	    end;
-	<<_:In/binary,Char,_/binary>> ->
-	    set_in(In+1),
+	_N ->
+	    %% fixme: utf8
+	    <<Char>> = prim_buffer:read(Buffer, 1),
 	    Char
     end.
 
 ?XT("source", source).
 source(SP,RP,IP,WP) ->
     T = get_tib(),
-    next([byte_size(T),T|SP],RP,IP,WP).
+    N = prim_buffer:size(T),
+    next([N,T|SP],RP,IP,WP).
 
 ?XT("refill", refill).
 refill(SP,RP,IP,WP) ->
@@ -836,11 +871,11 @@ restore_input(SP,RP,IP,WP) ->
 
 %% read a line and put it in TIB 
 refill_tib() ->
-    refill_tib(get_source_id()).
+    refill(get_tib(), get_source_id()).
 
-refill_tib(?STRING_INPUT) ->
+refill(_, ?STRING_INPUT) ->
     false;
-refill_tib(SourceID) ->
+refill(Buffer, SourceID) ->
     ALTOUT = altout(),
     case is_compiling() of
 	false when SourceID =:= ?TERMINAL_INPUT, 
@@ -851,12 +886,14 @@ refill_tib(SourceID) ->
     end,
     case ffe_tio:get_line(SourceID) of
 	eof ->
-	    set_source({0, <<>>}),
+	    prim_buffer:wipe(Buffer),
+	    %% set_source(<<>>),
 	    false;
-	Data ->
+	Data when is_binary(Data) ->
 	    set_out(0), %%? ok? or terminal only?
-	    Data1 = erlang:iolist_to_binary(Data),
-	    set_source({0, Data1}),
+	    prim_buffer:wipe(Buffer),
+	    prim_buffer:write(Buffer, [Data]),
+	    %% set_source(Data),
 	    true
     end.
 
@@ -987,28 +1024,19 @@ enclose(Ch,Data,DoSkip) ->
        true -> [N1,N2,(N2-N1)]
     end.
 
-%% match characters
-match(C, C) -> true;
-match(?SPACE, ?TAB) -> true;
-match(_, _) ->  false.
-
 skip(Ch, Data, Offs) ->
     case Data of
-	<<_:Offs/binary,C,_/binary>> ->
-	    case match(Ch,C) of
-		true -> skip(Ch,Data,Offs+1);
-		false -> Offs
-	    end;
+	<<_:Offs/binary,Ch,_/binary>> ->
+	    skip(Ch,Data,Offs+1);
 	_ -> Offs
     end.
 
 take(Ch, Data, Offs) ->
     case Data of
-	<<_:Offs/binary,C,_/binary>> ->
-	    case match(Ch,C) of
-		false -> take(Ch,Data,Offs+1);
-		true -> Offs
-	    end;
+	<<_:Offs/binary,Ch,_/binary>> ->
+	    Offs;
+	<<_:Offs/binary, _/binary>> ->
+	    take(Ch,Data,Offs+1);
 	_ ->
 	    Offs
     end.
@@ -1071,13 +1099,15 @@ internal_words() ->
       ?WORD("if",         compile_if),
       ?WORD("then",       compile_then),
       ?WORD("else",       compile_else),
+      ?WORD("immediate",  immediate),
       
       ?WORD("\\",         backslash),
       ?WORD("(",          paren),
       ?WORD("(lit)",      lit),
       ?WORD("literal",    literal),
-      ?WORD("\"",         string),
+      ?WORD(",\"",        comma_quote),
       ?WORD("s\"",        s_quote),
+      ?WORD("c\"",        c_quote),
 
       ?WORD("char",       care),
 
@@ -1153,7 +1183,7 @@ smudge(SP, RP, IP, WP) ->
 ?XT("constant", compile_constant).
 compile_constant([Value|SP],RP,IP,WP) ->
     Name = word(?SPACE),
-    Def = {0, Name, fun ?MODULE:docon/4, Value }, 
+    Def = create_word(Name, fun ?MODULE:docon/4, Value), 
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
@@ -1162,7 +1192,7 @@ compile_constant([Value|SP],RP,IP,WP) ->
 compile_variable(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     Var = make_variable_ref(),
-    Def = {0, Name, fun ?MODULE:dovar/4, Var },
+    Def = create_word(Name, fun ?MODULE:dovar/4, Var),
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
@@ -1172,7 +1202,7 @@ compile_value([Value|SP],RP,IP,WP) ->
     Name = word(?SPACE),
     Var = make_variable_ref(),
     set_value(Var, Value),
-    Def = {0, Name, fun ?MODULE:doval/4, Var },
+    Def = create_word(Name, fun ?MODULE:doval/4, Var),
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
@@ -1181,7 +1211,7 @@ compile_value([Value|SP],RP,IP,WP) ->
 compile_defer(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     Var = make_variable_ref(),
-    Def = {0, Name, fun ?MODULE:doexec/4, Var },
+    Def = create_word(Name, fun ?MODULE:doexec/4, Var),
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
@@ -1204,7 +1234,7 @@ compile_user() ->
     { 0, <<"user">>, fun ?MODULE:compile_user/4 }.
 compile_user([Value|SP],RP,IP,WP) ->
     Name = word(?SPACE),
-    Def = {0, Name, fun ?MODULE:dousr/4, Value },
+    Def = create_word(Name, fun ?MODULE:dousr/4, Value),
     define(Name, fun() -> Def end),
     next(SP,RP,IP,WP).
 
@@ -1228,7 +1258,20 @@ forward_patch__(Pos) ->
     Offset = NextPos - Pos + 1,
     Here = here(),
     here(erlang:setelement(Pos+1,Here,Offset-1)).
-    
+
+?IXT("immediate", immediate).
+immediate(SP,RP,IP,WP) ->
+    Latest = get_user(#user.latest),
+    case maps:get(Latest, current(), false) of
+	false ->
+	    %% fixme: abort?
+	    next(SP,RP,IP,WP);
+	Xt ->
+	    W = Xt(),
+	    W1 = ?set_ff(W, ?ff(W) bor ?IMMEDIATE),
+	    define(Latest,fun() -> W1 end),
+	    next(SP,RP,IP,WP)
+    end.
 
 %% DO - ffe compiler, immediate word
 ?IXT("do", compile_do).
@@ -1304,8 +1347,9 @@ compile_else(SP,RP,IP,WP) ->
 ?XT("create", create).
 create(SP,RP,IP,WP) ->
     Name = word(?SPACE),
-    Does0 = {0,Name,fun ?MODULE:does0/4, 0},
+    Does0 = create_word(Name,fun ?MODULE:does0/4, 0),
     here(Does0),
+    set_latest(Name),
     cf_push(?CF_CREATE),
     next(SP, RP, IP, WP).
 
@@ -1464,13 +1508,11 @@ semis(SP,[IP|RP],_IP,WP) ->
 	    next(SP,RP,IP,WP)
     end.
 
-branch() ->
-    {0, <<"branch">>, fun ffe:branch/4 }.
+?XT("branch", branch).
 branch(SP,RP,?WPTR(IP,Code),WP) ->
     next(SP,RP,?WPTR(IP+element(IP,Code),Code),WP).
 
-zbranch() ->
-    {0, <<"0branch">>, fun ffe:zbranch/4 }.
+?XT("0branch", zbranch).
 zbranch([0|SP],RP,?WPTR(IP,Code),WP) ->
     Offset = element(IP,Code),
     next(SP,RP,?WPTR(IP+Offset,Code),WP);
@@ -1480,9 +1522,8 @@ zbranch([_|SP],RP,?WPTR(IP,Code),WP) ->
 %% char
 ?XT("char", care).
 care(SP,RP,IP,WP) ->
-    Char = char(),
+    Char = char_(),
     next([Char|SP],RP,IP,WP).
-
 
 ?IXT("\\", backslash).
 backslash(SP,RP,IP,WP) ->
@@ -1494,18 +1535,25 @@ paren(SP,RP,IP,WP) ->
     parse($)),       %% skip until ')'
     next(SP,RP,IP,WP).
 
-?IXT("\"", string).
-string(SP,RP,IP,WP) ->
+%% compile counted string (fixme? allow max 255 chars)
+?IXT(",\"", comma_quote).
+comma_quote(SP,RP,IP,WP) ->
+    compile_only(),
     String = parse($"),
-    case is_compiling() of
-	true ->
-	    comma_(fun ffe:lit/0),
-	    comma_(String),
-	    next(SP,RP,IP,WP);
-	false ->
-	    next([String|SP],RP,IP,WP)
-    end.
+    comma_(fun ffe:lit/0),
+    comma_(String),
+    next(SP,RP,IP,WP).
 
+%% compile: counted string
+?IXT("c\"", c_quote).
+c_quote(SP,RP,IP,WP) ->
+    compile_only(),
+    String = parse($"),
+    comma_(fun ffe:lit/0),
+    comma_(String),
+    next(SP,RP,IP,WP).
+
+%% compile: len/string interpret: push len/string
 ?IXT("s\"", s_quote).
 s_quote(SP,RP,IP,WP) ->
     String = parse($"),
@@ -1584,10 +1632,12 @@ emit_value(Fd, Value) ->
        is_float(Value) ->
 	    emit_string(Fd,io_lib_format:fwrite_g(Value));
        is_binary(Value) ->
-	    emit_string(Fd,Value);
+	    emit_strings(Fd,["\"",Value,"\""]);
        is_pid(Value) ->
 	    emit_string(Fd,pid_to_list(Value));
-       true -> %% hmm recursivly display integers in base()!
+       true ->
+	    %% hmm recursivly display integers in base()!
+	    %% FIXME: remove all use of io_lib and io
 	    emit_string(Fd,lists:flatten(io_lib:format("~p",[Value])))
     end.    
 

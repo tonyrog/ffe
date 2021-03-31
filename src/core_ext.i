@@ -33,7 +33,7 @@ colon_noname(SP,RP,IP,WP) ->
     interpreting(),
     cf_reset(),
     set_state(?COMPILE bor ?NONAME),
-    here({0,"",fun ffe:docol/4}),
+    here(create_word(<<"">>,fun ffe:docol/4)),
     next(SP, RP, IP, WP).
 
 ?XT("parse", parse).
