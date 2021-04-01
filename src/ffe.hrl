@@ -7,13 +7,21 @@
 -define(BYE,       bye).    %% fixme
 -define(ABORT,           -1).
 -define(ABORTQ,          -2).
--define(STACK_OVERFLOW,  -3).
--define(STACK_UNDERFLOW, -4).    %% case clause?
--define(ARITH,           -10).   %% arith
--define(UNDEF,           -13).   %% undefined word
--define(ARGUMENT_MISMATCH, -12).
+
+-define(ERR_STACK_OVERFLOW,  -3).
+-define(ERR_STACK_UNDERFLOW, -4).    %% case clause?
+-define(ERR_DIVZ,           -10).
+-define(ERR_ARGTYPE,         -12).
+-define(ERR_UNDEF,           -13).   %% undefined word
+-define(ERR_COMPILE_ONLY,    -14).
+-define(ERR_CONTROL_MISMATCH, -22).
+-define(ERR_FILEPOS,           -36).
+-define(ERR_FILEIO,            -37).
+-define(ERR_FILENOENT,         -38).
+-define(ERR_UNEXPECTEDEOF,     -39).
+-define(ERR_INTERRUPT,       -28).   %% user interrupt
+
 -define(QUIT,            -56).
--define(INTERRUPT,       -28).   %% user interrupt
 
 %%
 %% Forth word layout:

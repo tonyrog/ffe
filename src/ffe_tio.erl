@@ -72,20 +72,18 @@ get_line(?STANDARD_INPUT) ->
 	eof ->  eof;
 	Line -> strip_nl(Line)
     end;
-
 get_line(Fd) when is_integer(Fd), Fd > 2 ->
-    case file:read_line(Fd) of
+    case file:read_line(ffe:get_fd(Fd)) of
 	eof -> eof;
 	{ok,Line} -> strip_nl(Line)
     end.
-
 
 strip_nl(Line) when is_binary(Line) ->
     LineSize1 = byte_size(Line)-1,
     LineSize2 = LineSize1-1,
     case Line of
-	<<Line2:LineSize2,$\r,$\n>> -> Line2;
-	<<Line1:LineSize1,$\n>> -> Line1;
+	<<Line2:LineSize2/binary,$\r,$\n>> -> Line2;
+	<<Line1:LineSize1/binary,$\n>> -> Line1;
 	_ -> Line
     end;
 strip_nl(Line) when is_list(Line) ->

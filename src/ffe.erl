@@ -36,14 +36,18 @@
 %% lookup WoRd, fail lookup to_lower(word) if found and ?ICASE then ok!
 -define(ICASE,       16#20).
 
--define(CF_ORIG, 1).
--define(CF_DEST, 2).
--define(CF_DO_SYS, 3).
--define(CF_QDO_SYS, 4).
--define(CF_COLON_SYS, 5).
--define(CF_CASE_SYS, 6).
--define(CF_OF_SYS, 7).
--define(CF_SWITCH_SYS, 8).
+-define(CF_NONE,   0).
+-define(CF_IF,     1).
+-define(CF_DEST,   2).
+-define(CF_DO,     3).
+-define(CF_QDO,    4).
+-define(CF_COLON,  5).
+-define(CF_CASE,   6).
+-define(CF_OF,     7).
+-define(CF_ENDOF,  8).
+-define(CF_SWITCH, 9).
+-define(CF_WHILE,  10).
+-define(CF_LEAVE,  11).
 
 -define(CF_CREATE, 100).
 
@@ -423,6 +427,11 @@ get_out() ->
 set_out(N) when is_integer(N),N>=0 -> 
     set_user(#user.out, N).
 
+set_blk(N) ->
+    set_user(#user.blk, N).
+get_blk() ->
+    get_user(#user.blk).
+
 get_source_id() -> 
     get_user(#user.source_id).
 
@@ -459,15 +468,24 @@ get_csp() ->
 set_csp(Stack) ->
     set_user(#user.csp,Stack).
 
-cf_push(Tag) ->  set_csp([Tag|get_csp()]).
+cf_push(Tag,Pos) ->  set_csp([{Tag,Pos}|get_csp()]).
 
-cf_pop() ->
-    case get_csp() of
-	[] -> throw({-22, control_structure});
-	[Tag|Stack1] ->
-	    set_csp(Stack1),
-	    Tag
-    end.
+cf_pop() -> 
+    cf_pop(?CF_LEAVE).
+
+cf_pop(Keep) ->
+    Stack = get_csp(),
+    {TagPos,Stack1} = cf_pop_(Stack,Keep,[]),
+    set_csp(Stack1),
+    TagPos.
+
+cf_pop_([TagPos={Keep,_}|Stack],Keep,Stack1) ->
+    cf_pop_(Stack,Keep,[TagPos|Stack1]);
+cf_pop_([TagPos|Stack],_Keep,Stack1) ->
+    {TagPos,lists:reverse(Stack1, Stack)};
+cf_pop_([],_Keep,Stack1) ->
+    {empty,lists:reverse(Stack1)}.
+
 
 %% cf_top() -> hd(get_csp()).
 cf_reset() -> set_csp([]).
@@ -639,7 +657,7 @@ exec(W, SP) ->
 	    quit0();
 	throw:{?ABORTQ=_Code,_Reason} ->
 	    quit0();
-	throw:{?UNDEF=Code,Reason} ->
+	throw:{?ERR_UNDEF=Code,Reason} ->
 	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
 	    quit0();
 	throw:{Code,Reason} ->
@@ -671,6 +689,7 @@ evaluate([U,Addr|SP],RP,IP,WP) ->
     set_source_id(?STRING_INPUT),
     set_source(make_source(String)),
     set_state(0),
+    %% FIXME: this should be a special call 
     SP1 = main(SP),
     set_source_id(SourceID0),
     set_tib(Tib0),
@@ -696,16 +715,21 @@ catch0([Xt|SP],RP,IP,WP) ->
     R = cret(),
     CFA(SP,RP,?WPTR(?PFA,R),?WPTR(?PFA,W)).
 
-?XT("throw", throw0).
-throw0([N|SP],RP,IP,WP) ->
+?XT("throw", throw_).
+throw_([N|SP],RP,IP,WP) ->
     if N =:= 0 ->
 	    next(SP,RP,IP,WP);
        true ->
-	    case get_user(#user.exceptions) of
-		[{SP1,RP1,IP1,WP1}|Exceptions] ->
-		    set_user(#user.exceptions, Exceptions),
-		    next([N|SP1],RP1,IP1,WP1)
-	    end
+	    throw__(RP,RP,IP,WP,N)
+    end.
+
+throw__(_SP,_RP,_IP,_WP,Exception={N,_Data}) ->
+    case get_user(#user.exceptions) of
+	[{SP1,RP1,IP1,WP1}|Exceptions] ->
+	    set_user(#user.exceptions, Exceptions),
+	    next([N|SP1],RP1,IP1,WP1);
+	[] ->
+	    throw(Exception)
     end.
 
 dump_stacktrace(StackTrace) ->
@@ -790,7 +814,7 @@ parse_(C, DoSkip) ->
     parse_(get_tib(), C, DoSkip).
 
 parse_(Buffer, C, DoSkip) ->
-    case prim_buffer:find_byte_index(Buffer, C) of
+    case buffer_index(Buffer, C) of
 	{ok,0} when DoSkip ->
 	    prim_buffer:skip(Buffer, 1),
 	    parse_(Buffer, C, DoSkip);
@@ -809,6 +833,22 @@ parse_(Buffer, C, DoSkip) ->
 		    prim_buffer:read(Buffer, N)
 	    end
     end.
+
+%% special byte_index that handle BL/TAB
+buffer_index(Buffer, ?BL) ->
+    case prim_buffer:find_byte_index(Buffer, ?BL) of
+	not_found ->
+	    prim_buffer:find_byte_index(Buffer, ?TAB);
+	{ok,P1} ->
+	    case prim_buffer:find_byte_index(Buffer, ?TAB) of
+		not_found ->
+		    {ok,P1};
+		{ok,P2} ->
+		    {ok,min(P1,P2)}
+	    end
+    end;
+buffer_index(Buffer, C) ->
+    prim_buffer:find_byte_index(Buffer, C).
 
 char_() ->
     char_(get_tib()).
@@ -854,7 +894,7 @@ number([U,Buffer|SP],RP,IP,WP) ->
 	Int -> next([Int|SP],RP,IP,WP)
     catch
 	error:_ ->
-	    throw({?ARGUMENT_MISMATCH, argument_mismatch})
+	    throw__(SP,RP,IP,WP,{?ERR_ARGTYPE,"integer expected"})
     end.
 
 ?XT("save-input", save_input).
@@ -1074,6 +1114,7 @@ internal_words() ->
       ?WORD("(do)",       pdo),
       ?WORD("(?do)",      pqdo),
       ?WORD("(loop)",     ploop),
+      ?WORD("(+loop)",    pploop),
       ?WORD("noop", noop),
       ?WORD("base", base),
       ?WORD("argv", argv),
@@ -1095,11 +1136,24 @@ internal_words() ->
       ?WORD("is",         is),
       ?WORD("do",         compile_do),
       ?WORD("?do",        compile_qdo),
+      ?WORD("leave",      compile_leave),
       ?WORD("loop",       compile_loop),
+      ?WORD("+loop",      compile_ploop),
       ?WORD("if",         compile_if),
       ?WORD("then",       compile_then),
       ?WORD("else",       compile_else),
+      ?WORD("begin",      compile_begin),
+      ?WORD("again",      compile_again),
+      ?WORD("until",      compile_until),
+      ?WORD("while",      compile_while),
+      ?WORD("repeat",     compile_repeat),
+      ?WORD("case",       compile_case),
+      ?WORD("endcase",    compile_endcase),
+      ?WORD("of",         compile_of),
+      ?WORD("endof",      compile_endof),
       ?WORD("immediate",  immediate),
+      ?WORD("unloop",     unloop),
+      ?WORD("exit",       exit),
       
       ?WORD("\\",         backslash),
       ?WORD("(",          paren),
@@ -1118,23 +1172,23 @@ internal_words() ->
       ?WORD("accept",     accept),
       ?WORD("number",     number),
       ?WORD("evaluate",   evaluate),
-      ?WORD("catch",      catch0),
-      ?WORD("throw",      throw0),
+      ?WORD("catch",      catch_),
+      ?WORD("throw",      throw_),
 
       %% Utils - will be strapped later
 
       ?WORD("remove",     remove_word),
-      ?WORD("show",       show_word),
+      ?WORD("see",        see_word),
       ?WORD("unthread",   unthread_word)
      }.
 
-%%
-%% General word layout
-%% {Flags, <<"Name">>, fun cfa/4, fun pf1/0, ... fun pfn/0}
-%%
+%% run next op
+?XT("(next)", next).
 next(SP,RP,?WPTR(IP,Code),?WPTR(_WP,_W)) ->
     PF = element(IP, Code),  %% code parameter 
     W = PF(),                %% tuple word
+    %% trace (fixme) make trace version of next!
+    %%emit_strings(?TERMINAL_OUTPUT, [<<"word:">>,element(?NFA,W),<<?CRNL>>]),
     CFA = ?cf(W),            %% read CFA
     CFA(SP,RP,?WPTR(IP+1,Code),?WPTR(?PFA,W)).
 
@@ -1216,22 +1270,21 @@ compile_defer(SP,RP,IP,WP) ->
     next(SP,RP,IP,WP).
 
 ?XT("is", is).
-is([Xt|SP],RP,IP,Code) ->
+is([Xt|SP],RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Yt} ->
 	    Var = element(?PFA, Yt()),
 	    set_value(Var, Xt),
-	    next(SP,RP,IP,Code);
+	    next(SP,RP,IP,WP);
 	false ->
-	    throw({?UNDEF, Name})
+	    throw__(SP,RP,IP,WP,?ERR_UNDEF)
     end.
 
 make_variable_ref() ->
     {var, erlang:unique_integer([])}.
 
-compile_user() ->
-    { 0, <<"user">>, fun ?MODULE:compile_user/4 }.
+?XT("user", compile_user).
 compile_user([Value|SP],RP,IP,WP) ->
     Name = word(?SPACE),
     Def = create_word(Name, fun ?MODULE:dousr/4, Value),
@@ -1254,10 +1307,22 @@ forward_patch_(Pos) ->
     here(erlang:setelement(Pos,Here,Offset)).
 
 forward_patch__(Pos) ->
-    NextPos = here_(),
+    forward_patch__(Pos, 0).
+
+forward_patch__(Pos, AddToHere) ->
+    NextPos = here_() + AddToHere,
     Offset = NextPos - Pos + 1,
     Here = here(),
     here(erlang:setelement(Pos+1,Here,Offset-1)).
+
+forward_patch_all(Tag,Keep,AddToHere) ->
+    case cf_pop(Keep) of
+	{Tag, Pos} ->
+	    forward_patch__(Pos,AddToHere),
+	    forward_patch_all(Tag,Keep,AddToHere);
+	Other ->
+	    Other
+    end.
 
 ?IXT("immediate", immediate).
 immediate(SP,RP,IP,WP) ->
@@ -1276,81 +1341,279 @@ immediate(SP,RP,IP,WP) ->
 %% DO - ffe compiler, immediate word
 ?IXT("do", compile_do).
 compile_do(SP,RP,IP,WP) ->
-    compile_only(),
-    cf_push(here_()), cf_push(?CF_DO_SYS),
-    comma_(fun ffe:pdo/0),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"do"});
+	true ->
+	    comma_(fun ffe:pdo/0),
+	    cf_push(?CF_DO,here_()),
+	    next(SP,RP,IP,WP)
+    end.
 
 %% ?DO immediate word
 ?IXT("?do", compile_qdo).
 compile_qdo(SP,RP,IP,WP) ->
-    compile_only(),
-    cf_push(here_()), cf_push(?CF_QDO_SYS),
-    comma_(fun ffe:pqdo/0),
-    comma_(0),  %% patch this place
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"?do"});
+	true ->
+	    comma_(fun ffe:pqdo/0),
+	    comma_(0),  %% patch this place
+	    cf_push(?CF_QDO, here_()),
+	    next(SP,RP,IP,WP)
+    end.
+
+%% LEAVE immediate word
+?IXT("leave", compile_leave).
+compile_leave(SP,RP,IP,WP) ->
+    comma_(fun ?MODULE:unloop/0),
+    comma_(fun ?MODULE:branch/0),
+    cf_push(?CF_LEAVE,here_()),
+    comma_(0),  %% jump to location after LOOP/+LOOP
     next(SP,RP,IP,WP).
 
 %% LOOP immediate word
 ?IXT("loop", compile_loop).
 compile_loop(SP,RP,IP,WP) ->
-    compile_only(),
-    case cf_pop() of
-	?CF_DO_SYS ->
-	    comma_(fun ?MODULE:ploop/0),
-	    Pos = cf_pop(),
-	    back_(Pos+1);
-	?CF_QDO_SYS ->
-	    comma_(fun ?MODULE:ploop/0),
-	    Pos = cf_pop(),
-	    back_(Pos+2),
-	    forward_patch_(Pos+2);
-	_ -> 
-	    throw({-22, "loop missing DO/?DO"})
-    end,
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"loop"});
+	true ->
+	    %% +2 for ploop,back-label
+	    case forward_patch_all(?CF_LEAVE,?CF_NONE,2) of
+		{?CF_DO,Pos} ->
+		    comma_(fun ?MODULE:ploop/0),
+		    back_(Pos),
+		    next(SP,RP,IP,WP);
+		{?CF_QDO,Pos} ->
+		    comma_(fun ?MODULE:ploop/0),
+		    back_(Pos),
+		    forward_patch_(Pos),
+		    next(SP,RP,IP,WP);
+		_ -> 
+		    throw__(SP,RP,IP,WP,{?ERR_CONTROL_MISMATCH, 
+					 "loop missing do/?do"})
+	    end
+    end.
+
+%% +LOOP immediate word
+?IXT("+loop", compile_ploop).
+compile_ploop(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"+loop"});
+	true ->
+	    %% +2 for pploop,back-label
+	    case forward_patch_all(?CF_LEAVE,?CF_NONE,2) of
+		{?CF_DO,Pos} ->
+		    comma_(fun ?MODULE:pploop/0),
+		    back_(Pos),
+		    next(SP,RP,IP,WP);
+		{?CF_QDO,Pos} ->
+		    comma_(fun ?MODULE:pploop/0),
+		    back_(Pos),
+		    forward_patch_(Pos),
+		    next(SP,RP,IP,WP);
+		_ -> 
+		    throw__(SP,RP,IP,WP,{?ERR_CONTROL_MISMATCH, 
+					 "loop missing do/?do"})
+	    end
+    end.
 
 ?IXT("if", compile_if).
 compile_if(SP,RP,IP,WP) ->
-    compile_only(),
-    comma_(fun ?MODULE:zbranch/0),    %% postpone 0branch
-    cf_push(here_()), cf_push(?CF_ORIG),
-    comma_(0),  %% patch this place
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"if"});
+	true ->
+	    comma_(fun ?MODULE:zbranch/0),    %% postpone 0branch
+	    cf_push(?CF_IF,here_()),
+	    comma_(0),  %% patch this place
+	    next(SP,RP,IP,WP)
+    end.
 
 ?IXT("then", compile_then).
 compile_then(SP,RP,IP,WP) ->
-    compile_only(),
-    case cf_pop() of
-	?CF_ORIG ->
-	    Pos = cf_pop(),
-	    forward_patch__(Pos),
-	    next(SP,RP,IP,WP);
-	_ ->
-	    throw({-22, "THEN missing IF/ELSE"})
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"then"});
+	true ->
+	    case cf_pop() of
+		{?CF_IF,Pos} ->
+		    forward_patch__(Pos),
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,{?ERR_CONTROL_MISMATCH, "then missing if/else"})
+	    end
     end.
 
 ?IXT("else", compile_else).
 compile_else(SP,RP,IP,WP) ->
-    compile_only(),
-    case cf_pop() of
-	?CF_ORIG ->
-	    Pos = cf_pop(),
-	    comma_(fun ?MODULE:branch/0),    %% postpone 0branch
-	    cf_push(here_()), cf_push(?CF_ORIG),
-	    comma_(0),  %% patch this place
-	    forward_patch__(Pos),
-	    next(SP,RP,IP,WP);
-	_ ->
-	    throw({-22, "ELSE missing IF"})
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"else"});
+	true ->
+	    case cf_pop() of
+		{?CF_IF,Pos} ->
+		    comma_(fun ?MODULE:branch/0),    %% postpone 0branch
+		    cf_push(?CF_IF,here_()),
+		    comma_(0),  %% patch this place
+		    forward_patch__(Pos),
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "else missing if"})
+	    end
     end.
 
+?IXT("begin", compile_begin).
+compile_begin(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"begin"});
+	true ->
+	    cf_push(?CF_DEST, here_()),
+	    next(SP,RP,IP,WP)
+    end.
+
+?IXT("again", compile_again).
+compile_again(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"again"});
+	true ->
+	    case cf_pop() of
+		{?CF_DEST,Pos} ->
+		    comma_(fun ?MODULE:branch/0),
+		    back_(Pos),
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "again missing begin"})
+	    end
+    end.
+
+?IXT("until", compile_until).
+compile_until(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"until"});
+	true ->
+	    case cf_pop() of
+		{?CF_DEST,Pos} ->
+		    comma_(fun ?MODULE:zbranch/0),
+		    back_(Pos),
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "until missing begin"})
+	    end
+    end.
+
+?IXT("while", compile_while).
+compile_while(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"while"});
+	true ->
+	    case cf_pop() of
+		{?CF_DEST,Pos} ->
+		    comma_(fun ?MODULE:zbranch/0),
+		    cf_push(?CF_WHILE, {Pos,here_()}),
+		    comma_(0),  %% patch this place after repeat
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "while missing begin"})
+	    end
+    end.
+
+?IXT("repeat", compile_repeat).
+compile_repeat(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"repeat"});
+	true ->
+	    case cf_pop() of
+		{?CF_WHILE,{BeginPos,WhilePos}} ->
+		    comma_(fun ?MODULE:branch/0),
+		    back_(BeginPos),
+		    forward_patch__(WhilePos),  %% zbranch here
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "repeat missing while"})
+	    end
+    end.
+
+?IXT("case", compile_case).
+compile_case(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"case"});
+	true ->
+	    cf_push(?CF_CASE,here_()),
+	    next(SP,RP,IP,WP)
+    end.
+
+?IXT("of", compile_of).
+compile_of(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"of"});
+	true ->
+	    comma_(fun ?MODULE:over/0),
+	    comma_(fun ?MODULE:equal/0),
+	    comma_(fun ?MODULE:zbranch/0),
+	    cf_push(?CF_OF, here_()),
+	    comma_(0), %% jump past case code
+	    comma_(fun ?MODULE:drop/0),
+	    next(SP,RP,IP,WP)
+    end.
+
+?IXT("endof", compile_endof).
+compile_endof(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"endof"});
+	true ->
+	    case cf_pop() of
+		{?CF_OF, Pos} ->
+		    comma_(fun ?MODULE:branch/0),
+		    cf_push(?CF_ENDOF,here_()),
+		    comma_(0),  %% patch this place
+		    forward_patch__(Pos), %% patch failed case
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,
+			    {?ERR_CONTROL_MISMATCH, "endof missing of"})
+	    end
+    end.
+
+?IXT("endcase", compile_endcase).
+compile_endcase(SP,RP,IP,WP) ->
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"endcase"});
+	true ->
+	    comma_(fun ?MODULE:drop/0),
+	    case forward_patch_all(?CF_ENDOF,?CF_LEAVE,0) of
+		{?CF_CASE, _} ->
+		    next(SP,RP,IP,WP);
+		_ ->
+		    throw__(SP,RP,IP,WP,{?ERR_CONTROL_MISMATCH, "endcase missing case"})
+	    end
+    end.
+
+%% fixme: should possible to do thinks like "create vec 1 , 2 , 3 , "
+%% but is not yet
 ?XT("create", create).
 create(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     Does0 = create_word(Name,fun ?MODULE:does0/4, 0),
     here(Does0),
     set_latest(Name),
-    cf_push(?CF_CREATE),
+    cf_push(?CF_CREATE,here_()),
     next(SP, RP, IP, WP).
 
 ?XT("does>", does).
@@ -1383,11 +1646,23 @@ pqdo([_I,_N|SP],RP,?WPTR(IP,Code),WP) ->
     next(SP,RP,?WPTR(IP+element(IP,Code),Code),WP).
 
 ?XT("(loop)", ploop).
-ploop(SP,[I|RP=[N|RP1]],?WPTR(IP,Code),WP) ->
-    if I < N-2 ->
-	    next(SP,[I+1|RP],?WPTR(IP+element(IP,Code),Code),WP);
+ploop(SP,[I|RP=[L|RP1]],?WPTR(IP,Code),WP) ->
+    I1 = I + 1,
+    if I1 =:= L ->
+	    next(SP,RP1,?WPTR(IP+1,Code),WP);
        true ->
-	    next(SP,RP1,?WPTR(IP+1,Code),WP)
+	    next(SP,[I1|RP],?WPTR(IP+element(IP,Code),Code),WP)
+    end.
+
+?XT("(+loop)", pploop).
+pploop([N|SP],[I|RP=[L|RP1]],?WPTR(IP,Code),WP) ->
+    I1 = I + N,
+    if L>0, I1 >= L ->
+	    next(SP,RP1,?WPTR(IP+1,Code),WP);
+       L<0, I1 =< L-1 ->
+	    next(SP,RP1,?WPTR(IP+1,Code),WP);
+       true ->
+	    next(SP,[I1|RP],?WPTR(IP+element(IP,Code),Code),WP)
     end.
 
 %%?XT("base", base).
@@ -1399,21 +1674,28 @@ ploop(SP,[I|RP=[N|RP1]],?WPTR(IP,Code),WP) ->
 
 
 ?XT("to", to).
-to([Value|SP],RP,IP,Code) ->
+to([Value|SP],RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
 	    Var = element(?PFA, Xt()),
 	    set_value(Var, Value),
-	    next(SP,RP,IP,Code);
+	    next(SP,RP,IP,WP);
 	false ->
-	    throw({?UNDEF, Name})
+	    throw__(SP,RP,IP,WP,{?ERR_UNDEF,Name})
     end.
 
-?XT("leave", leave).
-leave(SP,[_,RP=[Limit|_]],IP,WP) ->
-    next(SP,[Limit|RP],IP,WP).
+%% remove loop parameters from return stack
+?XT("unloop", unloop).
+unloop(SP,[_I,_Limit|RP],IP,WP) ->
+    next(SP,RP,IP,WP).
 
+%% exit execution of current word (like semis)
+?XT("exit", exit).
+exit(SP,[IP|RP],_IP,WP) ->
+    next(SP,RP,IP,WP).
+
+%% special return from execution
 ?XT("ret", ret).
 ret(SP,_RP,_IP,_Code) ->
     SP.
@@ -1428,11 +1710,15 @@ lit(SP,RP,?WPTR(IP,Code),WP) ->
 
 ?IXT("literal", literal).
 literal(SP,RP,IP,WP) ->
-    compile_only(),
-    [X|SP1] = SP,
-    comma_(fun ffe:lit/0),
-    comma_(X),
-    next(SP1,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"literal"});
+	true ->
+	    [X|SP1] = SP,
+	    comma_(fun ffe:lit/0),
+	    comma_(X),
+	    next(SP1,RP,IP,WP)
+    end.
 
 ?XT("execut", execut).
 execut([Xt|SP],RP,IP,_WP) ->
@@ -1484,14 +1770,12 @@ does0(SP,RP,?WPTR(IP,Code),WP=?WPTR(Pos,Wf)) ->
     next([?WPTR(Pos+1,Wf)|SP],RP,?WPTR(IP+1,Code),WP).
 
 %% does with offset to does> code
-does1() ->
-    { 0, <<"(does>)">>, fun ?MODULE:does1/4 }.
+?XT("(does>)", does1).
 does1(SP,RP,IP,WP=?WPTR(Pos,Wft)) ->
     ?WPTR(XPos,Xt) = element(Pos, Wft),
     next([?WPTR(Pos+1,Wft)|SP],[IP|RP],?WPTR(XPos,Xt()),WP).
 
-semis() ->    
-    { 0, "(semis)", fun ?MODULE:semis/4 }.
+?XT("(semis)", semis).
 semis(SP,[IP|RP],_IP,WP) ->
     %% special treat when reach ';' while doing create and 
     %% does> is not found
@@ -1538,20 +1822,28 @@ paren(SP,RP,IP,WP) ->
 %% compile counted string (fixme? allow max 255 chars)
 ?IXT(",\"", comma_quote).
 comma_quote(SP,RP,IP,WP) ->
-    compile_only(),
-    String = parse($"),
-    comma_(fun ffe:lit/0),
-    comma_(String),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,",\""});
+	true ->
+	    String = parse($"),
+	    comma_(fun ffe:lit/0),
+	    comma_(String),
+	    next(SP,RP,IP,WP)
+    end.
 
 %% compile: counted string
 ?IXT("c\"", c_quote).
 c_quote(SP,RP,IP,WP) ->
-    compile_only(),
-    String = parse($"),
-    comma_(fun ffe:lit/0),
-    comma_(String),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"c\""});
+	true ->
+	    String = parse($"),
+	    comma_(fun ffe:lit/0),
+	    comma_(String),
+	    next(SP,RP,IP,WP)
+    end.
 
 %% compile: len/string interpret: push len/string
 ?IXT("s\"", s_quote).
@@ -1569,16 +1861,16 @@ s_quote(SP,RP,IP,WP) ->
     end.
 
 %% output a word as erlang code - fixme only allow colon defs!
-?XT("show", show_word).
-show_word(SP,RP,IP,WP) ->
+?XT("see", see_word).
+see_word(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
-	    show_def(altout(), Name, ?UNTHREAD_NONE, Xt);
+	    show_def(altout(), Name, ?UNTHREAD_NONE, Xt),
+	    next(SP,RP,IP,WP);
 	false ->
-	    throw({?UNDEF, Name})
-    end,
-    next(SP,RP,IP,WP).
+	    throw__(SP,RP,IP,WP,{?ERR_UNDEF, Name})
+    end.
 
 %% unthread a word
 ?XT("unthread", unthread_word).
@@ -1586,11 +1878,11 @@ unthread_word(SP,RP,IP,WP) ->
     Name = word(?SPACE),
     case find_word_(Name) of
 	{_, Xt} ->
-	    save_def(altout(), ffe, Name, ?UNTHREAD_ALL, Xt);
+	    save_def(altout(), ffe, Name, ?UNTHREAD_ALL, Xt),
+	    next(SP,RP,IP,WP);
 	false ->
-	    throw({?UNDEF, Name})
-    end,
-    next(SP,RP,IP,WP).
+	    throw__(SP,RP,IP,WP,{?ERR_UNDEF, Name})
+    end.
 
 %% Remove word from current dictionary
 %% Remember that words that refer to this word will 
@@ -1610,13 +1902,6 @@ enter_compile() ->
 
 leave_compile() ->
     set_state(get_state() band (bnot ?COMPILE)).
-
-%% utils - fixme define in forth
-compile_only() ->
-    case is_compiling() of
-	false -> throw({-14,compile_only});
-	true -> ok
-    end.
 
 interpreting() ->
     case get_state() of
@@ -1815,6 +2100,9 @@ environment_query([U,CAddr|SP],RP,IP,WP) ->
 	    next([?TRUE,Value|SP],RP,IP,WP)
     end.
 
+%% FIXME: mostly phony numbers since erlang has bignums
+%% should we emulate various CELLSIZES? maybe optional?
+%% maybe use 0 as unlimited?
 environment_lookup(String) ->
     case String of
 	<<"/counted-string">> -> 65535;

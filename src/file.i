@@ -56,7 +56,6 @@ file_words() ->
       ?WORD("resize-file",  resize_file),
       ?WORD("include-file", include_file),
       ?WORD("included",     included),
-      ?WORD("include",      include),
       ?WORD("read-file",    read_file),
       ?WORD("read-line",    read_line),
 %%    ?WORD("refill",       refill),   CORE+FILE
@@ -242,6 +241,36 @@ write_line([FileID,U,Addr|SP],RP,IP,WP) ->
 	{error,Reason} ->
 	    next([ior(Reason)|SP],RP,IP,WP)
     end.
+
+?XT("include-file", include_file).
+include_file([FileID|SP],RP,IP,WP) ->
+    SP1 = file_include(FileID,SP),    
+    next(SP1,RP,IP,WP).
+
+?XT("included", included).
+included([U,CAddr|SP],RP,IP,WP) ->
+    <<Filename:U/binary,_/binary>> = CAddr,
+    case file_open(Filename, [read]) of
+	[0,FileID] ->
+	    SP1 = file_include(FileID,SP),
+	    next(SP1,RP,IP,WP);
+	[_IOR,_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_FILENOENT,Filename})
+    end.
+    
+file_include(FileID,SP) ->
+    Tib0 = get_tib(),
+    SourceID0 = get_source_id(),
+    %% setup evaluation env
+    set_source_id(FileID),
+    set_tib(make_source(<<>>)),  %% create new input buffer
+    set_blk(0),
+    %% FIXME: setup catch frame and add close to exception handlig
+    SP1 = main(SP),
+    file_close(FileID),
+    set_source_id(SourceID0),
+    set_tib(Tib0),               %% set original input buffer
+    SP1.
 
 %% internal file open / close
 file_open(Filename, Mode) ->

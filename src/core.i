@@ -77,6 +77,7 @@ core_words() ->
        ?WORD("quit",       quit),
        ?WORD("rot",        rot),
        ?WORD("rshift",     rshift),
+       ?WORD("arshift",    arshift),
        ?WORD("swap",       swap),
        ?WORD("space",      space),
        ?WORD("spaces",     spaces),
@@ -202,7 +203,7 @@ tick(SP, RP, IP, WP) ->
 	{_,Xt} -> 
 	    next([Xt|SP], RP,IP, WP);
 	false -> 
-	    throw({?UNDEF, Name})
+	    throw__(SP,RP,IP,WP,{?ERR_UNDEF, Name})
     end.
 
 ?XT("!", store).
@@ -220,7 +221,8 @@ star(SP,RP,IP,WP) ->
 ?XT("*/", star_slash).
 star_slash(SP,RP,IP,WP) ->
     case SP of
-	[0|_] -> throw({?ARITH, "division by zero"});
+	[0|_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
 	[C,B,A|SP1] when is_integer(A), is_integer(B) ->
 	    next([(A*B) div C|SP1],RP,IP,WP)
     end.
@@ -228,7 +230,8 @@ star_slash(SP,RP,IP,WP) ->
 ?XT("*/", star_slash_mod).
 star_slash_mod(SP,RP,IP,WP) ->
     case SP of
-	[0|_] -> throw({?ARITH, "division by zero"});
+	[0|_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
 	[C,B,A|SP1] when is_integer(A), is_integer(B) ->
 	    T = A*B,
 	    next([T rem C, T div C|SP1],RP,IP,WP)
@@ -239,26 +242,34 @@ star_slash_mod(SP,RP,IP,WP) ->
 %% compile: compile string literal that is printed at runtime
 ?IXT(".\"", dot_quote).
 dot_quote(SP,RP,IP,WP) ->
-    compile_only(),
-    String = word($"),
-    comma_(fun ?MODULE:lit/0),
-    comma_(String),
-    comma_(fun ?MODULE:count/0),
-    comma_(fun ?MODULE:type/0),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,".\""});
+	true ->
+	    String = word($"),
+	    comma_(fun ?MODULE:lit/0),
+	    comma_(String),
+	    comma_(fun ?MODULE:count/0),
+	    comma_(fun ?MODULE:type/0),
+	    next(SP,RP,IP,WP)
+    end.
 
 ?XT("/", slash).
 slash(SP,RP,IP,WP) ->
     case SP of
-	[0|_] -> throw({?ARITH, "division by zero"});
-	[B,A|SP]-> next([B div A|SP],RP,IP,WP)
+	[0|_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
+	[B,A|SP]->
+	    next([B div A|SP],RP,IP,WP)
     end.
 
 ?XT("/mod", slash_mod).
 slash_mod(SP,RP,IP,WP) ->    
     case SP of
-	[0|_] -> throw({?ARITH, "division by zero"});
-	[B,A|SP]-> next([A rem B,A div B|SP],RP,IP,WP)
+	[0|_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
+	[B,A|SP]->
+	    next([A rem B,A div B|SP],RP,IP,WP)
     end.
 
 %% colon definition
@@ -273,22 +284,27 @@ colon(SP, RP, IP, WP) ->
 
 ?IXT(";", semicolon).
 semicolon(SP,RP,IP,WP) ->
-    compile_only(),
-    case get_csp() of
-	[] ->
-	    Def = comma_(fun ?MODULE:semis/0),
-	    Xt = fun() -> Def end,
-	    here({}),  %% clear defintion area
-	    NoName = (get_state() band ?NONAME) =:= ?NONAME,
-	    set_state(0),
-	    if NoName ->
-		    next([Xt|SP],RP,IP,WP);
-	       true ->
-		    define(?nf(Def), Xt),
-		    next(SP,RP,IP,WP)
-	    end;
-	_ ->
-	    throw({-22, control_structure})
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,";"});
+	true ->
+	    case get_csp() of
+		[] ->
+		    Def = comma_(fun ?MODULE:semis/0),
+		    Xt = fun() -> Def end,
+		    here({}),  %% clear defintion area
+		    NoName = (get_state() band ?NONAME) =:= ?NONAME,
+		    set_state(0),
+		    if NoName ->
+			    next([Xt|SP],RP,IP,WP);
+		       true ->
+			    define(?nf(Def), Xt),
+			    next(SP,RP,IP,WP)
+		    end;
+		_ ->
+		    throw__(SP,RP,IP,WP,{?ERR_CONTROL_MISMATCH, 
+					 " ; out side definition"})
+	    end
     end.
 
 ?XT("?dup", qdup).
@@ -317,26 +333,34 @@ left_bracket(SP,RP,IP,WP) ->
 %% [char]
 ?IXT("[char]", bracket_care).
 bracket_care(SP,RP,IP,WP) ->
-    compile_only(),
-    Char = char_(),
-    comma_(fun ?MODULE:lit/0),
-    comma_(Char),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"[char]"});
+	true ->
+	    Char = char_(),
+	    comma_(fun ?MODULE:lit/0),
+	    comma_(Char),
+	    next(SP,RP,IP,WP)
+    end.
 
 %% [CODE']
 
 ?IXT("[']", bracket_tick).
 %% compile only 
 bracket_tick(SP,RP,IP,WP) ->
-    compile_only(),
-    Name = word($\s),
-    case find_word_(Name) of
-	{_,Xt} -> 
-	    comma_(fun ?MODULE:lit/0),
-	    comma_(Xt),
-	    next(SP, RP, IP, WP);
-	false -> 
-	    throw({?UNDEF, Name})
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,"[']"});
+	true ->
+	    Name = word($\s),
+	    case find_word_(Name) of
+		{_,Xt} -> 
+		    comma_(fun ?MODULE:lit/0),
+		    comma_(Xt),
+		    next(SP, RP, IP, WP);
+		false -> 
+		    throw__(SP,RP,IP,WP,{?ERR_UNDEF, Name})
+	    end
     end.
 
 ?XT("<", less).
@@ -404,8 +428,10 @@ rot(SP,RP,IP,WP) ->
 ?XT("mod", mod).
 mod(SP,RP,IP,WP) ->
     case SP of
-	[0|_] -> throw({?ARITH, "division by zero"});
-	[B,A|SP]-> next([A rem B|SP],RP,IP,WP)
+	[0|_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
+	[B,A|SP]->
+	    next([A rem B|SP],RP,IP,WP)
     end.
 
 ?XT("negate", negate).
@@ -444,7 +470,7 @@ emit([Char|SP],RP,IP,WP) ->
 	    emit_char(Char),
 	    next(SP,RP,IP,WP);
        true ->
-	    throw({?ARITH, "character range"})
+	    throw__(SP,WP,IP,WP,{?ERR_ARGTYPE, "character out-of-range"})
     end.
 
 ?XT("find", find).
@@ -467,6 +493,11 @@ lshift(SP,RP,IP,WP) ->
 rshift(SP,RP,IP,WP) ->
     [B,A|SP1] = SP,
     next([A bsr B|SP1],RP,IP,WP).    
+
+?XT("arshift", arshift).
+arshift(SP,RP,IP,WP) ->
+    [B,A|SP1] = SP,
+    next([A bsr B|SP1],RP,IP,WP).
 
 ?XT(bl).
 bl(SP,RP,IP,WP) -> 
@@ -500,16 +531,20 @@ doabort(_SP,_RP,_IP,_WP) ->
 
 ?IXT("abort\"", abort_quote).
 abort_quote(SP,RP,IP,WP) ->
-    String = parse($"),
-    compile_only(),
-    comma_(fun ?MODULE:zbranch/0),
-    comma_(6),
-    comma_(fun ?MODULE:lit/0),
-    comma_(String),
-    comma_(fun ?MODULE:count/0),
-    comma_(fun ?MODULE:type/0),
-    comma_(fun ?MODULE:doabort/0),
-    next(SP,RP,IP,WP).
+    case is_compiling() of
+	false ->
+	    throw__(SP,RP,IP,WP,{?ERR_COMPILE_ONLY,".\""});
+	true ->
+	    String = parse($"),
+	    comma_(fun ?MODULE:zbranch/0),
+	    comma_(6),
+	    comma_(fun ?MODULE:lit/0),
+	    comma_(String),
+	    comma_(fun ?MODULE:count/0),
+	    comma_(fun ?MODULE:type/0),
+	    comma_(fun ?MODULE:doabort/0),
+	    next(SP,RP,IP,WP)
+    end.
 
 ?XT("and", 'and').
 'and'(SP,RP,IP,WP) ->

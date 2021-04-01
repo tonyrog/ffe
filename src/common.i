@@ -12,7 +12,8 @@ common_words() ->
       ?WORD("2+",          two_plus),
       ?WORD(",\"",         comma_string), %% compile string
       ?WORD("[defined]",   defined),
-      ?WORD("[undefined]", defined),
+      ?WORD("[undefined]", undefined),
+      ?WORD("include",     include),
       %% not so common
       ?WORD("-rot",        minus_rot)
      }.
@@ -55,6 +56,17 @@ undefined(SP,RP,IP,WP) ->
 	    next([?TRUE|SP], RP, IP, WP)
     end.
 
+?XT("include", include).
+include(SP,RP,IP,WP) ->
+    Filename = word($\s),
+    case file_open(Filename, [read]) of
+	[0,FileID] ->
+	    SP1 = file_include(FileID,SP),
+	    next(SP1,RP,IP,WP);
+	[_IOR,_] ->
+	    throw__(SP,RP,IP,WP,{?ERR_FILENOENT,Filename})
+    end.
+    
 %% not so common?
 ?XT("-rot", minus_rot).
 minus_rot(SP,RP,IP,WP) ->
