@@ -17,6 +17,7 @@
 ?EXPORT(fover).
 ?EXPORT(frot).
 ?EXPORT(fswap).
+?EXPORT(fdepth).
 ?EXPORT('f+').
 ?EXPORT('f-').
 ?EXPORT('f*').
@@ -32,6 +33,13 @@
 ?EXPORT('f0<').
 ?EXPORT('f0=').
 ?EXPORT('f<').
+?EXPORT(floats).
+?EXPORT(float_plus).
+?EXPORT(to_float).
+%% FALIGN
+%% FALIGNED
+%% FCONSTANT
+%% FLITERAL
 ?XPORT(has_floating).
 ?XPORT(has_floating_stack).
 ?XPORT(max_float).
@@ -67,6 +75,9 @@ fswap(SP,RP,IP,WP) ->
     [B,A|SP1] = SP,
     ?next([A,B|SP1],RP,IP,WP).
 
+?XT(fdepth).
+fdepth(SP,RP,IP,WP) ->
+    ?next([length(SP)|SP],RP,IP,WP).
 
 ?XT('n>f').    
 'n>f'([N|SP],RP,IP,WP) -> ?next([float(N)|SP],RP,IP,WP).
@@ -131,6 +142,23 @@ fswap(SP,RP,IP,WP) ->
 ?XT('f0=').
 'f0='([A|SP],RP,IP,WP) -> ?next([?BOOL(A =:= 0.0)|SP],RP,IP,WP).
 
+?XT(floats).
+floats([N|SP],RP,IP,WP) -> ?next([N*1|SP],RP,IP,WP).
+
+?XT("float+", float_plus).
+float_plus([Addr|SP],RP,IP,WP) -> ?next([Addr+1|SP],RP,IP,WP).
+
+?XT(">float", to_float).
+to_float([U,Addr|SP],RP,IP,WP) ->
+    {Data,_Addr1} = ffe:buffer_read(Addr, U),
+    try binary_to_float(Data) of
+	Float->
+	    ?next([?TRUE,Float|SP],RP,IP,WP)
+    catch
+	error:_ ->
+	    ?next([?FALSE|SP],RP,IP,WP)
+    end.
+
 words() ->
     #{
       ?WORD("n>f", 'n>f'),
@@ -151,5 +179,8 @@ words() ->
       ?WORD("f0=", 'f0='),
       ?WORD("f<", 'f<'),
       ?WORD("has-floating", has_floating),
-      ?WORD("has-floating-stack", has_floating_stack)
+      ?WORD("has-floating-stack", has_floating_stack),
+      ?WORD("floats", floats),
+      ?WORD("floats+", floats_plus),
+      ?WORD(">float", to_float)
      }.

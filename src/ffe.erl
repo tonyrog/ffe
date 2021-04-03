@@ -800,7 +800,50 @@ lookup_word_(Name, [Dict|Ds]) ->
 lookup_word_(_Name, []) ->
     error.
 
+%% special byte_index that handle BL/TAB
+buffer_index(Buffer, ?BL) when is_reference(Buffer) ->
+    case prim_buffer:find_byte_index(Buffer, ?BL) of
+	not_found ->
+	    prim_buffer:find_byte_index(Buffer, ?TAB);
+	{ok,P1} ->
+	    case prim_buffer:find_byte_index(Buffer, ?TAB) of
+		not_found ->
+		    {ok,P1};
+		{ok,P2} ->
+		    {ok,min(P1,P2)}
+	    end
+    end;
+buffer_index(Buffer, C) when is_reference(Buffer) ->
+    prim_buffer:find_byte_index(Buffer, C);
+buffer_index(Buffer, ?BL) when is_binary(Buffer) ->
+    case binary:macth(Buffer, [<<?BL>>,<<?TAB>>], []) of
+	nomatch -> not_found;
+	{Pos,_} -> {ok,Pos}
+    end;
+buffer_index(Buffer, C) when is_binary(Buffer) ->
+    case binary:macth(Buffer, [<<C>>], []) of
+	nomatch -> not_found;
+	{Pos,_} -> {ok,Pos}
+    end.
 
+buffer_read(Addr, Len) when is_reference(Addr) ->  %% must be prim_buffer
+    Data = prim_buffer:read(Addr, Len),
+    {Data,Addr};
+buffer_read(Addr, Len) when is_binary(Addr) ->
+    <<Addr2:Len/binary, Rest/binary>> = Addr,
+    {Addr2,Rest}.
+
+buffer_skip(Addr, Len) when is_reference(Addr) ->  %% must be prim_buffer
+    prim_buffer:skip(Addr, Len),
+    Addr;
+buffer_skip(Addr, Len) when is_binary(Addr) ->
+    <<_:Len/binary, Addr2/binary>> = Addr,
+    Addr2.
+
+buffer_size(Addr) when is_reference(Addr) ->
+    prim_buffer:size(Addr);
+buffer_size(Addr) when is_binary(Addr) ->
+    byte_size(Addr).
 
 			    
 %% TIB  = line buffer
@@ -816,45 +859,30 @@ parse_(C, DoSkip) ->
 parse_(Buffer, C, DoSkip) ->
     case buffer_index(Buffer, C) of
 	{ok,0} when DoSkip ->
-	    prim_buffer:skip(Buffer, 1),
-	    parse_(Buffer, C, DoSkip);
+	    Buffer1 = buffer_skip(Buffer, 1),
+	    parse_(Buffer1, C, DoSkip);
 	{ok,N} ->
-	    Result = prim_buffer:read(Buffer, N),
-	    prim_buffer:skip(Buffer, 1), %% skip C character
+	    {Result,Buffer1} = buffer_read(Buffer, N),
+	    _Buffer2 = buffer_skip(Buffer1, 1), %% skip C character
 	    Result;
 	not_found ->
-	    case prim_buffer:size(Buffer) of
+	    case buffer_size(Buffer) of
 		0 ->
 		    case refill(Buffer, get_source_id()) of
 			false -> eof;
 			true -> parse_(Buffer, C, DoSkip)
 		    end;
 		N ->
-		    prim_buffer:read(Buffer, N)
+		    {Result,_Buffer1} = buffer_read(Buffer, N),
+		    Result
 	    end
     end.
-
-%% special byte_index that handle BL/TAB
-buffer_index(Buffer, ?BL) ->
-    case prim_buffer:find_byte_index(Buffer, ?BL) of
-	not_found ->
-	    prim_buffer:find_byte_index(Buffer, ?TAB);
-	{ok,P1} ->
-	    case prim_buffer:find_byte_index(Buffer, ?TAB) of
-		not_found ->
-		    {ok,P1};
-		{ok,P2} ->
-		    {ok,min(P1,P2)}
-	    end
-    end;
-buffer_index(Buffer, C) ->
-    prim_buffer:find_byte_index(Buffer, C).
 
 char_() ->
     char_(get_tib()).
 
 char_(Buffer) ->
-    case prim_buffer:size(Buffer) of
+    case buffer_size(Buffer) of
 	0 ->
 	    case refill(Buffer, get_source_id()) of
 		false -> eof;
@@ -862,14 +890,14 @@ char_(Buffer) ->
 	    end;
 	_N ->
 	    %% fixme: utf8
-	    <<Char>> = prim_buffer:read(Buffer, 1),
+	    {<<Char>>,_Buffer1} = buffer_read(Buffer, 1),
 	    Char
     end.
 
 ?XT("source", source).
 source(SP,RP,IP,WP) ->
     T = get_tib(),
-    N = prim_buffer:size(T),
+    N = buffer_size(T),
     next([N,T|SP],RP,IP,WP).
 
 ?XT("refill", refill).
@@ -889,13 +917,33 @@ pad(SP,RP,IP,WP) ->
 
 ?XT("number", number).
 number([U,Buffer|SP],RP,IP,WP) ->
-    Data = prim_buffer:read(Buffer, U),
-    try binary_to_integer(Data) of
-	Int -> next([Int|SP],RP,IP,WP)
-    catch
-	error:_ ->
-	    throw__(SP,RP,IP,WP,{?ERR_ARGTYPE,"integer expected"})
+    {Data,_Buffer1} = buffer_read(Buffer, U),
+    case to_number_(Data, get_base(), 0) of
+	[0,_,N] ->
+	    next([N|SP],RP,IP,WP);
+	_ ->
+	    throw__(SP,RP,IP,WP,{?ERR_ARGTYPE,"number expected"})
     end.
+
+?XT(">number", to_number).
+to_number([U1,Buffer1,Ud1|SP],RP,IP,WP) ->
+    {Data,_Buffer2} = buffer_read(Buffer1, U1),
+    [U2,Data2,Ud2] = to_number_(Data, get_base(), Ud1),
+    next([U2,Data2,Ud2|SP],RP,IP,WP).
+
+to_number_(Addr = <<C,Rest/binary>>, Base, Num) ->
+    if C >= $0, C =< $9 ->
+	    to_number_(Rest, Base, Base*Num + (C-$0));
+       C >= $A, C < ($A-10)+Base ->
+	    to_number_(Rest, Base, Base*Num + ((C-$A)+10));
+       C >= $a, C < ($a-10)+Base ->
+	    to_number_(Rest, Base, Base*Num + ((C-$a)+10));
+       true ->
+	    [byte_size(Addr),Addr,Num]
+    end;
+to_number_(<<>>, _Base, Num) ->
+    [0,<<>>,Num].
+
 
 ?XT("save-input", save_input).
 save_input(SP,RP,IP,WP) ->
@@ -1171,6 +1219,7 @@ internal_words() ->
       ?WORD("pad",        pad),
       ?WORD("accept",     accept),
       ?WORD("number",     number),
+      ?WORD(">number",    to_number),
       ?WORD("evaluate",   evaluate),
       ?WORD("catch",      catch_),
       ?WORD("throw",      throw_),
@@ -1605,7 +1654,7 @@ compile_endcase(SP,RP,IP,WP) ->
 	    end
     end.
 
-%% fixme: should possible to do thinks like "create vec 1 , 2 , 3 , "
+%% fixme: it should possible to do thinks like "create vec 1 , 2 , 3 , "
 %% but is not yet
 ?XT("create", create).
 create(SP,RP,IP,WP) ->
@@ -1619,7 +1668,7 @@ create(SP,RP,IP,WP) ->
 ?XT("does>", does).
 does(SP,RP,IP,WP) ->
     case get_csp() of
-	[?CF_CREATE|Csp] -> %% only in create?
+	[{?CF_CREATE,_Pos}|Csp] -> %% only in create?
 	    Def0 = here(),
 	    Name = ?nf(Def0),
 	    Def1 = ?set_cf(Def0, fun ?MODULE:does1/4),
@@ -1780,7 +1829,7 @@ semis(SP,[IP|RP],_IP,WP) ->
     %% special treat when reach ';' while doing create and 
     %% does> is not found
     case get_csp() of
-	[?CF_CREATE|Csp] ->
+	[{?CF_CREATE,_}|Csp] ->
 	    Def = here(),
 	    Name = element(?NFA, Def),
 	    define(Name, fun() -> Def end),

@@ -57,8 +57,11 @@ core_words() ->
        ?WORD("abort\"",    abort_quote),
        ?WORD("and",        'and'),
        ?WORD("bl",         bl),
+       ?WORD("cells",      cells),
+       ?WORD("cell+",      cell_plus),
        ?WORD("count",      count),
        ?WORD("cr",         cr),
+       ?WORD("depth",      depth),
        ?WORD("drop",       drop),
        ?WORD("dup",        dup),
        ?WORD("emit",       emit),
@@ -453,6 +456,10 @@ drop(SP,RP,IP,WP) ->
     [_|SP1] = SP,
     next(SP1,RP,IP,WP).
 
+?XT("depth", depth).
+depth(SP,RP,IP,WP) ->
+    next([length(SP)|SP],RP,IP,WP).
+
 ?XT("swap", swap).
 swap(SP,RP,IP,WP) ->
     [B,A|SP1] = SP,
@@ -510,6 +517,14 @@ count(SP=[Addr|_],RP,IP,WP) ->
        true ->
 	    next([0|SP],RP,IP,WP)
     end.
+
+?XT("cells", cells).
+cells([N|SP],RP,IP,WP) ->
+    next([N*1|SP],RP,IP,WP).
+
+?XT("cell+", cell_plus).
+cell_plus([Addr|SP],RP,IP,WP) ->
+    next([Addr|SP],RP,IP,WP).
 
 ?XT(cr).
 cr(SP,RP,IP,WP) ->
