@@ -222,7 +222,11 @@ get_line(Port, After, Before) ->
 	$\^p -> 
 	    get_line_previous_line(Port, After, Before);
 	$\^n -> 
-	    get_line_next_line(Port, After, Before);	
+	    get_line_next_line(Port, After, Before);
+	up -> 
+	    get_line_previous_line(Port, After, Before);
+	down ->
+	    get_line_next_line(Port, After, Before);
 	left ->
 	    get_line_backward_char(Port, After, Before);
 	right ->

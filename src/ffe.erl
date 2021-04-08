@@ -57,13 +57,14 @@
 -define(MAX_STACKTRACE_DEPTH, 10).
 
 -type prim_buffer() :: reference().
+-type here() :: reference().
 
 -record(user,
 	{
 	 tib :: undefined | prim_buffer(),  %% text input buffer
 	 pad :: undefined | prim_buffer(),  %% scratch input buffer
 	 width = 0,   %% max width of word (fix me not used)
-	 dp = {},     %% data pointer (fixme)
+	 dp :: undefined | here(),    %% word build buffer
 	 tty :: undefined | port(),  %% terminal input
 	 altout =  ?STANDARD_OUTPUT,
 	 in = 0,
@@ -307,10 +308,25 @@ show_def(Fd, Name, Unthread, Xt) ->
     W = Xt(),
     emit_string(Fd, ": "),
     emit_string(Fd, Name),
-    show_words_(Fd, 4, Unthread, W),
+    show_cf(Fd, ?cf(W)),
+    show_words_(Fd, ?PFA, Unthread, W),
     emit_string(Fd, " ;"),
     Name.
 
+show_cf(Fd, CF) ->
+    emit_char(Fd, ?BL),	    
+    if is_function(CF,4) ->
+	    {name,FName} = erlang:fun_info(CF, name),
+	    {module,Module} = erlang:fun_info(CF, module),
+	    emit_char(Fd, $[),
+	    emit_string(Fd, atom_to_list(Module)),
+	    emit_char(Fd, $:),
+	    emit_string(Fd, atom_to_list(FName)),
+	    emit_char(Fd, $]);
+       true ->
+	    emit_value(Fd, CF)
+    end.
+    
 show_words_(Fd, I, Unthread, Word) when I =< tuple_size(Word) ->
     show_word_(Fd, Unthread, element(I, Word)),
     show_words_(Fd, I+1, Unthread, Word);
@@ -335,7 +351,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 			    show_words_(Fd, 4, Unthread-1, Def);
 		       true ->
 			    Name = ?nf(Def),
-			    emit_char(Fd, ?SPACE),
+			    emit_char(Fd, ?BL),
 			    emit_string(Fd, ModStr),
 			    emit_string(Fd, Name)
 		    end;
@@ -343,7 +359,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 		    ok;
 		_ ->
 		    Name = ?nf(Def),
-		    emit_char(Fd, ?SPACE),
+		    emit_char(Fd, ?BL),
 		    emit_string(Fd, ModStr),
 		    emit_string(Fd, Name)		    
 	    end;
@@ -355,7 +371,7 @@ show_word_(Fd, Unthread, W) when is_function(W) ->
 	    emit_string(Fd, integer_to_list(Arity))
     end;
 show_word_(Fd, _Unthread, W) ->
-    emit_char(Fd, ?SPACE),
+    emit_char(Fd, ?BL),
     emit_value(Fd, W).
 
 init() ->
@@ -366,6 +382,7 @@ init() ->
 	    put(user, #user { 
 			 tib  = prim_buffer:new(),
 			 pad  = prim_buffer:new(),
+			 dp   = here:new(),
 			 argv = ?WPTR(1,Argv),
 			 tty = TTY,
 			 source_id = ?TERMINAL_INPUT,
@@ -375,6 +392,7 @@ init() ->
 	    put(user, #user { 
 			 tib  = prim_buffer:new(),			 
 			 pad  = prim_buffer:new(),
+			 dp   = here:new(),
 			 argv = ?WPTR(1,Argv),
 			 tty = undefined,
 			 source_id = ?STANDARD_INPUT,
@@ -531,12 +549,15 @@ hold_digits(M,N,B) ->
     hold_char(Char),
     hold_digits(M-1,N div B,B).
 
-here() -> get_user(#user.dp).
-here(Data) when is_tuple(Data) -> 
-    set_user(#user.dp, Data).
+get_dp() -> get_user(#user.dp).
+set_dp(H) when is_reference(H) -> 
+    set_user(#user.dp, H).
+new_dp() -> 
+    set_user(#user.dp, here:new()).
 
 here_() ->  %% get number of compiled words so far
-    tuple_size(here()).
+    here:here(get_user(#user.dp))-1.
+    %% tuple_size(here()).
 
 forth() -> get_user(#user.forth).
     
@@ -582,13 +603,13 @@ quit0() ->
 
 main(SP) ->
     Compile = is_compiling(),
-    case word(?SPACE) of
+    case word(?BL) of
 	eof ->
 	    SP;
 	Name ->
 	    case find_word_(Name) of
 		{false,Xt} when Compile -> comma_(Xt), main(SP);
-		{_, Xt} -> exec(Xt(), SP);
+		{_, Xt} -> exec(Xt, SP);
 		false -> main_number(Compile,Name,SP)
 	    end
     end.
@@ -625,59 +646,35 @@ to_integer(<<$$,Cs/binary>>, _Base) ->
 to_integer(Cs, Base) ->
     binary_to_integer(Cs, Base).
 
+make_xt() ->
+    make_xt(get_dp()).
+make_xt(H) ->
+    fun() ->
+	    case get(H) of
+		undefined -> T = here:copy(H), put(H, T), T;
+		T -> T
+	    end
+    end.
+
+%% version of make_xt without term "cache"
+make_xt0() ->
+    make_xt0(get_dp()).
+make_xt0(H) ->
+    fun() ->
+	    here:copy(H)
+    end.
+
 create_word(Name,CFA) when is_binary(Name),
 				is_function(CFA,4) ->
-    ?CREATE_WORD(Name, CFA).
+    comma_(0), comma_(Name), comma_(CFA).
 create_word(Name,CFA,PFA1) when is_binary(Name),
 				is_function(CFA,4) ->
-    ?CREATE_WORD(Name, CFA, PFA1).
+    comma_(0), comma_(Name), comma_(CFA), comma_(PFA1).
 
 create_imm(Name,CFA,PFA1) when is_binary(Name),
 			       is_function(CFA,4) ->
-    ?CREATE_IMM(Name, CFA, PFA1).
+    comma_(?IMMEDIATE), comma_(Name), comma_(CFA), comma_(PFA1).
 
-%% stub for return after exec
-exec_ret() ->
-    ?CREATE_WORD(<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0).
-exec_ret(_SP,_RP,_IP,_WP) ->
-    erlang:display("INTERNAL ERROR\n"),
-    throw({?QUIT, quit}).
-
-exec(W, SP) ->
-    CFA = ?cf(W),
-    R = exec_ret(),
-    try CFA(SP,[],?WPTR(?PFA,R),?WPTR(?PFA,W)) of
-	SP1 -> main(SP1)
-    catch
-	throw:{?BYE=_Code,_Reason} ->
-	    halt(0); %% ??
-	throw:{?QUIT=_Code,_Reason} ->
-	    quit0();
-	throw:{?ABORT=_Code,_Reason} ->
-	    quit0();
-	throw:{?ABORTQ=_Code,_Reason} ->
-	    quit0();
-	throw:{?ERR_UNDEF=Code,Reason} ->
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
-	    quit0();
-	throw:{Code,Reason} ->
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
-	    quit0();
-	?EXCEPTION(error,{case_clause,SP0},_StackTrace) when is_list(SP0) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
-	    dump_stacktrace(?GET_STACK(_StackTrace)),
-	    quit0();
-	?EXCEPTION(error,function_clause,_StackTrace) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
-	    dump_stacktrace(?GET_STACK(_StackTrace)),
-	    quit0();
-	?EXCEPTION(error,Reason,_StackTrace) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Internal error "),
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~p", [Reason])),
-	    ffe_tio:output(?STANDARD_OUTPUT, [?CRNL]),
-	    dump_stacktrace(?GET_STACK(_StackTrace)),
-	    quit0()
-    end.
 
 ?XT("evaluate",evaluate).
 evaluate([U,Addr|SP],RP,IP,WP) ->
@@ -994,7 +991,7 @@ accept_buffer_(SourceID, Buffer, Max) ->
 	eof -> 
 	    0;
 	Data when byte_size(Data) =< Max ->
-	    io:format("write data ~p to ~p\r\n", [[Data, <<"\s">>],Buffer]),
+	    %% io:format("write data ~p to ~p\r\n", [[Data, <<"\s">>],Buffer]),
 	    prim_buffer:write(Buffer, [Data,<<"\s">>]),
 	    byte_size(Data);
 	<<Data:Max/binary,_/binary>> ->
@@ -1004,13 +1001,13 @@ accept_buffer_(SourceID, Buffer, Max) ->
     
 expand(RevLine) ->
     %% match dictionary and collect all prefix matches
-    Match = collect_until(RevLine, ?SPACE, []),
+    Match = collect_until(RevLine, ?BL, []),
     case match_dicts(Match, [ffe:current() | ffe:forth()], []) of
 	[] ->
 	    {no, <<"">>, []};
 	[OneMatch] -> 
 	    Insert = remove_prefix(OneMatch, Match),
-	    {yes, <<Insert/binary,?SPACE>>, []};
+	    {yes, <<Insert/binary,?BL>>, []};
 	MultipleMatches=[FirstMatch|RestOfMatches] ->
 	    CommonMatch =
 		lists:foldl(
@@ -1091,7 +1088,7 @@ emit_counted_string(Fd, WordName, Width) ->
     N = ?name_len(WordName),
     if N < Width ->
 	    ffe_tio:output(Fd, WordName),
-	    ffe_tio:output(Fd, lists:duplicate(Width-N,?SPACE)),
+	    ffe_tio:output(Fd, lists:duplicate(Width-N,?BL)),
 	    set_out(get_out()+Width),
 	    Width;
        true ->
@@ -1231,15 +1228,81 @@ internal_words() ->
       ?WORD("unthread",   unthread_word)
      }.
 
-%% run next op
 ?XT("(next)", next).
-next(SP,RP,?WPTR(IP,Code),?WPTR(_WP,_W)) ->
-    PF = element(IP, Code),  %% code parameter 
-    W = PF(),                %% tuple word
-    %% trace (fixme) make trace version of next!
-    %%emit_strings(?TERMINAL_OUTPUT, [<<"word:">>,element(?NFA,W),<<?CRNL>>]),
-    CFA = ?cf(W),            %% read CFA
-    CFA(SP,RP,?WPTR(IP+1,Code),?WPTR(?PFA,W)).
+next(SP,RP,_IP0=?WPTR(IP,Code),_WP) ->
+    %% io:format("next: ip=~w, wp=~w\r\n", [_IP0,_WP]),
+    Xt = element(IP,Code),     %% code parameter 
+    next1(SP,RP,?WPTR(IP+1,Code),Xt).
+
+next1(SP,RP,IP,Xt) ->
+    Word = Xt(),
+    %%emit_strings(?TERMINAL_OUTPUT,[<<"word:">>,element(?NFA,Word),<<?CRNL>>]),
+    CA = ?cf(Word),     %% read CA
+    CA(SP,RP,IP,?WPTR(?PFA,Word)).
+
+?XT("(docol)", docol).
+docol(SP,RP,IP,WP) ->
+    %%io:format("docol: ip=~w, wp=~w\r\n", [IP,WP]),
+    next(SP,[IP|RP],WP,WP).
+
+?XT("(semis)", semis).
+semis(SP,[IP|RP],_IP,WP) ->
+    %% special treat when reach ';' while doing create and 
+    %% does> is not found
+    case get_csp() of
+	[{?CF_CREATE,_}|Csp] ->
+	    H = get_dp(),
+	    Name = here:fetch(H,?NFA),
+	    Xt = make_xt(H),
+	    define(Name, Xt),
+	    set_csp(Csp),  %% pop control stack
+	    %% set_state(0),
+	    next(SP,RP,IP,WP);
+	_ ->
+	    next(SP,RP,IP,WP)
+    end.
+
+%% stub for return after exec
+exec_ret() ->
+    ?CREATE_WORD(<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0).
+exec_ret(_SP,_RP,_IP,_WP) ->
+    erlang:display("INTERNAL ERROR\n"),
+    throw({?QUIT, quit}).
+
+exec(Xt, SP) ->
+    R = exec_ret(),
+    try next1(SP,[],?WPTR(?PFA,R),Xt) of
+	SP1 -> main(SP1)
+    catch
+	throw:{?BYE=_Code,_Reason} ->
+	    halt(0); %% ??
+	throw:{?QUIT=_Code,_Reason} ->
+	    quit0();
+	throw:{?ABORT=_Code,_Reason} ->
+	    quit0();
+	throw:{?ABORTQ=_Code,_Reason} ->
+	    quit0();
+	throw:{?ERR_UNDEF=Code,Reason} ->
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
+	    quit0();
+	throw:{Code,Reason} ->
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
+	    quit0();
+	?EXCEPTION(error,{case_clause,SP0},_StackTrace) when is_list(SP0) ->
+	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
+	    quit0();
+	?EXCEPTION(error,function_clause,_StackTrace) ->
+	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
+	    quit0();
+	?EXCEPTION(error,Reason,_StackTrace) ->
+	    ffe_tio:output(?STANDARD_OUTPUT, "Internal error "),
+	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~p", [Reason])),
+	    ffe_tio:output(?STANDARD_OUTPUT, [?CRNL]),
+	    dump_stacktrace(?GET_STACK(_StackTrace)),
+	    quit0()
+    end.
 
 add_addr(?WPTR(Y,W), X) when is_integer(X) -> ?WPTR(Y+X,W);
 add_addr(Y, X) when is_integer(Y) -> Y+X.
@@ -1273,54 +1336,55 @@ store_at(Addr,X) ->
 	    ets:insert(forth,{Addr,X})
     end.
 
-smudge() ->
-    { 0, <<"smudge">>, fun ffe:smudge/4 }.
+?XT("smudge", smudge).
 smudge(SP, RP, IP, WP) ->
-    Def = here(),
-    Def1 = ?set_ff(Def, ?ff(Def) bxor ?SMUDGE),
-    here(Def1),
+    Here = get_dp(),
+    here:store(Here,here:fetch(Here,?FFA) bxor ?SMUDGE),
     next(SP, RP, IP, WP).
-
 
 %% CONSTANT
 ?XT("constant", compile_constant).
 compile_constant([Value|SP],RP,IP,WP) ->
-    Name = word(?SPACE),
-    Def = create_word(Name, fun ?MODULE:docon/4, Value), 
-    define(Name, fun() -> Def end),
+    Name = word(?BL),
+    H = new_dp(),    
+    create_word(Name, fun ?MODULE:docon/4, Value),
+    define(Name, make_xt(H)),
     next(SP,RP,IP,WP).
 
 %% VARIABLE
 ?XT("variable", compile_variable).
 compile_variable(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
+    H = new_dp(),
     Var = make_variable_ref(),
-    Def = create_word(Name, fun ?MODULE:dovar/4, Var),
-    define(Name, fun() -> Def end),
+    create_word(Name, fun ?MODULE:dovar/4, Var),
+    define(Name, make_xt(H)),
     next(SP,RP,IP,WP).
 
 %% VALUE
 ?XT("value", compile_value).
 compile_value([Value|SP],RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
+    H = new_dp(),
     Var = make_variable_ref(),
     set_value(Var, Value),
-    Def = create_word(Name, fun ?MODULE:doval/4, Var),
-    define(Name, fun() -> Def end),
+    create_word(Name, fun ?MODULE:doval/4, Var),
+    define(Name, make_xt(H)),
     next(SP,RP,IP,WP).
 
 %% DEFER
 ?XT("defer", compile_defer).
 compile_defer(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
+    H = new_dp(),
     Var = make_variable_ref(),
-    Def = create_word(Name, fun ?MODULE:doexec/4, Var),
-    define(Name, fun() -> Def end),
+    create_word(Name, fun ?MODULE:doexec/4, Var),
+    define(Name, make_xt(H)),
     next(SP,RP,IP,WP).
 
 ?XT("is", is).
 is([Xt|SP],RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
     case find_word_(Name) of
 	{_, Yt} ->
 	    Var = element(?PFA, Yt()),
@@ -1335,14 +1399,16 @@ make_variable_ref() ->
 
 ?XT("user", compile_user).
 compile_user([Value|SP],RP,IP,WP) ->
-    Name = word(?SPACE),
-    Def = create_word(Name, fun ?MODULE:dousr/4, Value),
-    define(Name, fun() -> Def end),
+    Name = word(?BL),
+    H = new_dp(),
+    create_word(Name, fun ?MODULE:dousr/4, Value),
+    define(Name, make_xt(H)),
     next(SP,RP,IP,WP).
 
 comma_(Value) ->
-    Here = here(),
-    here(erlang:append_element(Here, Value)).
+    here:comma(get_dp(), Value).
+%%    Here = here(),
+%%    here(erlang:append_element(Here, Value)).
 
 back_(Pos) ->
     NextPos = here_(),
@@ -1352,8 +1418,11 @@ back_(Pos) ->
 forward_patch_(Pos) ->
     NextPos = here_(),
     Offset = NextPos - Pos + 1,
-    Here = here(),
-    here(erlang:setelement(Pos,Here,Offset)).
+    %% Here = here(),
+    %% here(erlang:setelement(Pos,Here,Offset)).
+    Here = get_dp(),
+    here:store(Here, Pos, Offset).
+
 
 forward_patch__(Pos) ->
     forward_patch__(Pos, 0).
@@ -1361,8 +1430,10 @@ forward_patch__(Pos) ->
 forward_patch__(Pos, AddToHere) ->
     NextPos = here_() + AddToHere,
     Offset = NextPos - Pos + 1,
-    Here = here(),
-    here(erlang:setelement(Pos+1,Here,Offset-1)).
+    Here = get_dp(),
+    here:store(Here, Pos+1, Offset-1).
+%%    Here = here(),
+%%    here(erlang:setelement(Pos+1,Here,Offset-1)).
 
 forward_patch_all(Tag,Keep,AddToHere) ->
     case cf_pop(Keep) of
@@ -1654,14 +1725,15 @@ compile_endcase(SP,RP,IP,WP) ->
 	    end
     end.
 
-%% fixme: it should possible to do thinks like "create vec 1 , 2 , 3 , "
-%% but is not yet
 ?XT("create", create).
 create(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
-    Does0 = create_word(Name,fun ?MODULE:does0/4, 0),
-    here(Does0),
+    Name = word(?BL),
+    H = new_dp(),
+    create_word(Name,fun ?MODULE:does0/4),
+    %% this position is reserved for defining word does1 link
+    comma_(0),
     set_latest(Name),
+    define(Name, make_xt0(H)),
     cf_push(?CF_CREATE,here_()),
     next(SP, RP, IP, WP).
 
@@ -1669,15 +1741,14 @@ create(SP,RP,IP,WP) ->
 does(SP,RP,IP,WP) ->
     case get_csp() of
 	[{?CF_CREATE,_Pos}|Csp] -> %% only in create?
-	    Def0 = here(),
-	    Name = ?nf(Def0),
-	    Def1 = ?set_cf(Def0, fun ?MODULE:does1/4),
+	    H = get_dp(),
+	    Name = here:fetch(H,?NFA),
+	    here:store(H, ?CFA, fun ?MODULE:does1/4),
 	    ?WPTR(DoesPos,DoesCode) = IP,
 	    DoesName = ?nf(DoesCode),
 	    {_, DoesXt} = find_word_(DoesName),
-	    Def2 = ?set_pf(1,Def1,?WPTR(DoesPos,DoesXt)),
-	    define(Name, fun() -> Def2 end),
-	    here({}),  %% clear defintion area
+	    here:store(H, ?PFA, ?WPTR(DoesPos,DoesXt)),
+	    define(Name, make_xt(H)),
 	    set_csp(Csp),  %% pop control stack
 	    [IP1|RP1] = RP,
 	    next(SP,RP1,IP1,WP)
@@ -1724,7 +1795,7 @@ pploop([N|SP],[I|RP=[L|RP1]],?WPTR(IP,Code),WP) ->
 
 ?XT("to", to).
 to([Value|SP],RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
     case find_word_(Name) of
 	{_, Xt} ->
 	    Var = element(?PFA, Xt()),
@@ -1782,32 +1853,31 @@ dodoes(SP,RP,IP,WP=?WPTR(Wi,W)) ->
     WP1 = ?WPTR(?PFA,W1),
     docol([WP|SP],RP,IP,WP1).
 
-docol() ->
-    { 0, <<"(docol)">>, fun ffe:docol/4 }.
-docol(SP,RP,IP,WP) ->
-    next(SP,[IP|RP],WP,WP).
 
 ?XT("(docon)", docon).
-docon(SP,RP,IP,WP0=?WPTR(W,WP)) ->
-    next([element(W,WP)|SP],RP,IP,WP0).
+docon(SP,RP,IP,WP=?WPTR(W,Word)) ->
+    %%io:format("docon: ip=~w, wp=~w\r\n", [IP,WP]),
+    next([element(W,Word)|SP],RP,IP,WP).
 
 ?XT("(dousr)", dousr).
 dousr(SP,RP,IP,WP0=?WPTR(W,WP)) ->
+    %%io:format("dousr: ip=~w, wp=~w\r\n", [IP,WP]),
     next([{user,element(W,WP)}|SP],RP,IP,WP0).
 
 ?XT("(dovar)", dovar).
-dovar(SP,RP,IP,WP0=?WPTR(W,WP)) ->
-    next([element(W,WP)|SP],RP,IP,WP0).
+dovar(SP,RP,IP,WP=?WPTR(W,Word)) ->
+    %%io:format("dovar: ip=~w, wp=~w\r\n", [IP,WP]),
+    next([element(W,Word)|SP],RP,IP,WP).
 
 ?XT("(doval)", doval).
-doval(SP,RP,IP,WP0=?WPTR(W,WP)) ->
-    next([get_value(element(W,WP))|SP],RP,IP,WP0).
+doval(SP,RP,IP,WP=?WPTR(W,Word)) ->
+    next([get_value(element(W,Word))|SP],RP,IP,WP).
 
 ?XT("(doexec)", doexec).
-doexec(SP,RP,IP,WP0=?WPTR(Wi,WP)) ->
-    case get_value(element(Wi,WP)) of
+doexec(SP,RP,IP,WP=?WPTR(Wi,Word)) ->
+    case get_value(element(Wi,Word)) of
 	0 ->
-	    next(SP,RP,IP,WP0);
+	    next(SP,RP,IP,WP);
 	Xt ->
 	    W = Xt(),            %% tuple word
 	    CFA = ?cf(W),        %% get code field
@@ -1815,31 +1885,16 @@ doexec(SP,RP,IP,WP0=?WPTR(Wi,WP)) ->
     end.
 
 %% default does code with no offset
-does0(SP,RP,?WPTR(IP,Code),WP=?WPTR(Pos,Wf)) ->
-    next([?WPTR(Pos+1,Wf)|SP],RP,?WPTR(IP+1,Code),WP).
+does0(SP,RP,IP,WP=?WPTR(Wi,Word)) ->
+    %% skip does1 reserved address
+    next([?WPTR(Wi+1,Word)|SP],RP,IP,WP).
 
 %% does with offset to does> code
 ?XT("(does>)", does1).
-does1(SP,RP,IP,WP=?WPTR(Pos,Wft)) ->
-    ?WPTR(XPos,Xt) = element(Pos, Wft),
-    next([?WPTR(Pos+1,Wft)|SP],[IP|RP],?WPTR(XPos,Xt()),WP).
+does1(SP,RP,IP,WP=?WPTR(Wi,Word)) ->
+    ?WPTR(XPos,Xt) = element(Wi, Word),
+    next([?WPTR(Wi+1,Word)|SP],[IP|RP],?WPTR(XPos,Xt()),WP).
 
-?XT("(semis)", semis).
-semis(SP,[IP|RP],_IP,WP) ->
-    %% special treat when reach ';' while doing create and 
-    %% does> is not found
-    case get_csp() of
-	[{?CF_CREATE,_}|Csp] ->
-	    Def = here(),
-	    Name = element(?NFA, Def),
-	    define(Name, fun() -> Def end),
-	    here({}),  %% clear defintion area
-	    set_csp(Csp),  %% pop control stack
-	    %% set_state(0),
-	    next(SP,RP,IP,WP);
-	_ ->
-	    next(SP,RP,IP,WP)
-    end.
 
 ?XT("branch", branch).
 branch(SP,RP,?WPTR(IP,Code),WP) ->
@@ -1912,7 +1967,7 @@ s_quote(SP,RP,IP,WP) ->
 %% output a word as erlang code - fixme only allow colon defs!
 ?XT("see", see_word).
 see_word(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
     case find_word_(Name) of
 	{_, Xt} ->
 	    show_def(altout(), Name, ?UNTHREAD_NONE, Xt),
@@ -1924,7 +1979,7 @@ see_word(SP,RP,IP,WP) ->
 %% unthread a word
 ?XT("unthread", unthread_word).
 unthread_word(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
     case find_word_(Name) of
 	{_, Xt} ->
 	    save_def(altout(), ffe, Name, ?UNTHREAD_ALL, Xt),
@@ -1938,7 +1993,7 @@ unthread_word(SP,RP,IP,WP) ->
 %% continue to work in interactive mode but will not compile!
 ?XT("remove", remove_word).
 remove_word(SP,RP,IP,WP) ->
-    Name = word(?SPACE),
+    Name = word(?BL),
     Current = maps:remove(Name, current()),
     current(Current),
     next(SP,RP,IP,WP).

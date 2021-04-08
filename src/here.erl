@@ -17,6 +17,7 @@
 -export([fetch/2]).
 -export([comma/2]).
 -export([copy/1]).
+-export([trim/1]).
 
 -define(nif_stub(),
 	erlang:nif_error({nif_not_loaded,module,?MODULE,line,?LINE})).
@@ -36,6 +37,4 @@ store(_H, _I, _T) -> ?nif_stub().
 fetch(_H, _I) -> ?nif_stub().
 comma(_H, _T) -> ?nif_stub().
 copy(_H) -> ?nif_stub().
-
-    
-    
+trim(_H) -> ?nif_stub().

@@ -13,7 +13,8 @@ core_ext_words() ->
       ?WORD("2>r",         two_tor),
       ?WORD("2r@",         two_r_fetch),
       ?WORD("2r>",         two_rfrom),
-      ?WORD("parse",       parse)
+      ?WORD("parse",       parse),
+      ?WORD("parse-name",       parse_name)
      }.
 
 ?XT("2>r", two_tor).
@@ -33,12 +34,18 @@ colon_noname(SP,RP,IP,WP) ->
     interpreting(),
     cf_reset(),
     set_state(?COMPILE bor ?NONAME),
-    here(create_word(<<"">>,fun ffe:docol/4)),
+    new_dp(),
+    create_word(<<"">>,fun ffe:docol/4),
     next(SP, RP, IP, WP).
 
 ?XT("parse", parse).
 parse([Char|SP],RP,IP,WP) ->
     Word = parse(Char),
+    next([byte_size(Word),Word|SP],RP,IP,WP).
+
+?XT("parse-name", parse_name).
+parse_name(SP,RP,IP,WP) ->
+    Word = word(?SPACE),
     next([byte_size(Word),Word|SP],RP,IP,WP).
     
 

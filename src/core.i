@@ -77,6 +77,7 @@ core_words() ->
        ?WORD("negate",     negate),
        ?WORD("or",         'or'),
        ?WORD("over",       over),
+       ?WORD("parse",      parse),
        ?WORD("quit",       quit),
        ?WORD("rot",        rot),
        ?WORD("rshift",     rshift),
@@ -262,8 +263,8 @@ slash(SP,RP,IP,WP) ->
     case SP of
 	[0|_] ->
 	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
-	[B,A|SP]->
-	    next([B div A|SP],RP,IP,WP)
+	[B,A|SP1]->
+	    next([A div B|SP1],RP,IP,WP)
     end.
 
 ?XT("/mod", slash_mod).
@@ -271,8 +272,8 @@ slash_mod(SP,RP,IP,WP) ->
     case SP of
 	[0|_] ->
 	    throw__(SP,RP,IP,WP,{?ERR_DIVZ, "division by zero"});
-	[B,A|SP]->
-	    next([A rem B,A div B|SP],RP,IP,WP)
+	[B,A|SP1]->
+	    next([A rem B,A div B|SP1],RP,IP,WP)
     end.
 
 %% colon definition
@@ -282,7 +283,8 @@ colon(SP, RP, IP, WP) ->
     cf_reset(),
     set_state(?COMPILE),
     Name = word($\s),
-    here(create_word(Name,fun ffe:docol/4)),
+    new_dp(),
+    create_word(Name,fun ffe:docol/4),
     next(SP, RP, IP, WP).
 
 ?IXT(";", semicolon).
@@ -293,15 +295,15 @@ semicolon(SP,RP,IP,WP) ->
 	true ->
 	    case get_csp() of
 		[] ->
-		    Def = comma_(fun ?MODULE:semis/0),
-		    Xt = fun() -> Def end,
-		    here({}),  %% clear defintion area
+		    comma_(fun ?MODULE:semis/0),
+		    Xt = make_xt(),
 		    NoName = (get_state() band ?NONAME) =:= ?NONAME,
 		    set_state(0),
 		    if NoName ->
 			    next([Xt|SP],RP,IP,WP);
 		       true ->
-			    define(?nf(Def), Xt),
+			    Name = here:fetch(get_dp(),?NFA),
+			    define(Name, Xt),
 			    next(SP,RP,IP,WP)
 		    end;
 		_ ->
@@ -451,6 +453,10 @@ over(SP,RP,IP,WP) ->
 quit(_SP,_RP,_IP,_WP) ->
     throw({?QUIT, quit}).
 
+drop(stack) ->
+    "( n -- )";
+drop(documentation) ->
+    "Discard the top stack item".
 ?XT("drop", drop).
 drop(SP,RP,IP,WP) ->
     [_|SP1] = SP,
@@ -460,11 +466,19 @@ drop(SP,RP,IP,WP) ->
 depth(SP,RP,IP,WP) ->
     next([length(SP)|SP],RP,IP,WP).
 
+swap(stack) ->
+    "( n1 n2 -- n2 n1 )";
+swap(documentation) ->
+    "Swaps the order of the top two stack items".
 ?XT("swap", swap).
 swap(SP,RP,IP,WP) ->
     [B,A|SP1] = SP,
     next([A,B|SP1],RP,IP,WP).
 
+dup(stack) ->
+    "( n -- n n )";
+dup(documentation) ->
+    "Duplicate the top stack item".
 ?XT("dup", dup).
 dup(SP,RP,IP,WP) ->
     [A|_] = SP,
@@ -508,7 +522,7 @@ arshift(SP,RP,IP,WP) ->
 
 ?XT(bl).
 bl(SP,RP,IP,WP) -> 
-    next([?SPACE|SP],RP,IP,WP).
+    next([?BL|SP],RP,IP,WP).
 
 ?XT(count).
 count(SP=[Addr|_],RP,IP,WP) ->

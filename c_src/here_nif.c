@@ -1,5 +1,5 @@
 //
-// FFE word builder
+// FFE word builder (1-indexed!)
 //
 
 #include <stdint.h>
@@ -64,8 +64,12 @@ static ERL_NIF_TERM here_comma(ErlNifEnv* env, int argc,
 static ERL_NIF_TERM here_copy(ErlNifEnv* env, int argc, 
 			      const ERL_NIF_TERM argv[]);
 
+static ERL_NIF_TERM here_trim(ErlNifEnv* env, int argc, 
+			      const ERL_NIF_TERM argv[]);
 
-#define DEFAULT_SIZE 64
+
+#define DEFAULT_SIZE 4
+#define EXTRA_SIZE   4
 
 ErlNifFunc here_funcs[] =
 {
@@ -79,6 +83,7 @@ ErlNifFunc here_funcs[] =
     { "fetch",   2, here_fetch },
     { "comma",   2, here_comma },
     { "copy",    1, here_copy  },
+    { "trim",    1, here_trim  },
 };
 
 static ErlNifResourceType* here_res;
@@ -88,30 +93,68 @@ static ERL_NIF_TERM zero;
 typedef struct {
     ErlNifEnv*    env;
     unsigned long  size;  // number of cells allocated
-    unsigned long  here;  // number of cells used (next cell to use)
+    unsigned long  dp;    // next cell to use
     ERL_NIF_TERM* cell;
 } here_object_t;
 
-static void here_dtor(ErlNifEnv* env, here_object_t* obj)
+static void h_dtor(ErlNifEnv* env, here_object_t* obj)
 {
-    DBG("here_dtor\r\n");
+    DBG("h_dtor\r\n");
     enif_free(obj->cell);
     enif_free_env(obj->env);
 }
+
+static long h_realloc(here_object_t* obj, long new_size)
+{
+    ERL_NIF_TERM* cell;
+    int i;
+    if (!(cell = enif_realloc(obj->cell, sizeof(ERL_NIF_TERM)*new_size)))
+	return -1;
+    for (i = obj->size; i < new_size; i++)
+	cell[i] = zero;
+    obj->size = new_size;
+    if (obj->dp > obj->size)
+	obj->dp = obj->size;
+    obj->cell = cell;
+    return new_size;
+}
+
+static long h_allot(here_object_t* obj, long n)
+{
+    long dp1 = obj->dp + n;
+    if (dp1 <= 0)
+	dp1 = 0;
+    else if (dp1 > obj->size) {
+	if (h_realloc(obj, dp1+EXTRA_SIZE) < 0)
+	    return -1;
+    }
+    obj->dp = dp1;
+    return dp1;
+}
+
+static void h_clear(here_object_t* obj, int trim)
+{
+    obj->dp = 0;
+    enif_clear_env(obj->env);
+    if (trim) {
+	enif_free(obj->cell);
+	obj->cell = NULL;
+	obj->size = 0;
+    }
+}
+
 
 ERL_NIF_TERM here_new(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     size_t initial_size = DEFAULT_SIZE;
     here_object_t* obj = NULL;
     ERL_NIF_TERM r;
-    int i;
 
     if (argc >= 1) {
 	unsigned long val;
 	if (!enif_get_ulong(env, argv[0], &val))
 	    goto error;
-	if (val > 0)
-	    initial_size = val;
+	initial_size = val;
     }
     if (!(obj = enif_alloc_resource(here_res, sizeof(here_object_t))))
 	goto error;
@@ -119,11 +162,8 @@ ERL_NIF_TERM here_new(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     
     if (!(obj->env = enif_alloc_env()))
 	goto error;
-    if (!(obj->cell = enif_alloc(sizeof(ERL_NIF_TERM)*initial_size)))
+    if (h_realloc(obj, initial_size) < 0)
 	goto error;
-    obj->size = initial_size;
-    for (i = 0; i < initial_size; i++)
-	obj->cell[i] = zero;    
     r = enif_make_resource(env, obj);
     enif_release_resource(obj);
     return r;
@@ -137,7 +177,6 @@ error:
 // move here position and possibly realloc
 ERL_NIF_TERM here_allot(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
-    unsigned long new_here = 0;
     here_object_t* obj;
     long n;
 
@@ -145,30 +184,9 @@ ERL_NIF_TERM here_allot(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 	return enif_make_badarg(env);
     if (!enif_get_long(env, argv[1], &n))
 	return enif_make_badarg(env);
-
-    if (n < 0) {
-	n = -n;
-	if (obj->here <= n)
-	    new_here = 0;
-	else
-	    new_here -= n;
-    }
-    else if (n > 0) {
-	new_here = obj->here + n;
-	if (new_here > obj->size) {
-	    unsigned long new_size = new_here + 128;
-	    ERL_NIF_TERM* new_cell;
-	    int i;
-	    if (!(new_cell = enif_realloc(obj->cell, new_size)))
-		return enif_make_badarg(env);
-	    for (i = obj->size; i < new_size; i++)
-		new_cell[i] = zero;
-	    obj->size = new_size;
-	    obj->cell = new_cell;
-	}
-    }
-    obj->here = new_here;
-    return enif_make_ulong(env, new_here);
+    if ((n = h_allot(obj, n)) < 0)
+	return enif_make_badarg(env);
+    return enif_make_long(env, n);
 }
 
 ERL_NIF_TERM here_here(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -176,7 +194,7 @@ ERL_NIF_TERM here_here(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     here_object_t* obj;
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
-    return enif_make_ulong(env, obj->here);
+    return enif_make_ulong(env, obj->dp+1);
 }
 
 ERL_NIF_TERM here_size(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -192,8 +210,7 @@ ERL_NIF_TERM here_clear(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     here_object_t* obj;
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
-    obj->here = 0;
-    enif_clear_env(obj->env);
+    h_clear(obj, 0);
     return ATOM(ok);
 }
 
@@ -205,9 +222,9 @@ ERL_NIF_TERM here_store(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
     if (!enif_get_int(env, argv[1], &index) ||
-	(index < 0) || (index >= (int)obj->size))
+	(index < 1) || (index > (int)obj->size))
 	return enif_make_badarg(env);
-    obj->cell[index] = enif_make_copy(obj->env, argv[2]);
+    obj->cell[index-1] = enif_make_copy(obj->env, argv[2]);
     return ATOM(ok);
 }
 
@@ -219,23 +236,25 @@ ERL_NIF_TERM here_fetch(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
     if (!enif_get_int(env, argv[1], &index) ||
-	(index < 0) || (index >= (int)obj->size))
+	(index < 1) || (index > (int)obj->size))
 	return enif_make_badarg(env);
-    return enif_make_copy(env, obj->cell[index]);
+    return enif_make_copy(env, obj->cell[index-1]);
 }
 
 ERL_NIF_TERM here_comma(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
 {
     here_object_t* obj;
-    unsigned long index;
+    unsigned long i;
     
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
-    if (obj->here >= obj->size)
-	return enif_make_badarg(env);
-    index = obj->here++;
-    obj->cell[index] = enif_make_copy(obj->env, argv[1]);
-    return enif_make_ulong(env, index);
+    if (obj->dp >= obj->size) {
+	if (h_realloc(obj, obj->dp+EXTRA_SIZE) < 0)
+	    return enif_make_badarg(env);
+    }
+    i = obj->dp++;
+    obj->cell[i] = enif_make_copy(obj->env, argv[1]);
+    return enif_make_ulong(env, i+1);
 }
 
 ERL_NIF_TERM here_copy(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
@@ -245,15 +264,28 @@ ERL_NIF_TERM here_copy(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
     if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
 	return enif_make_badarg(env);
     {
-        ERL_NIF_TERM cell[obj->here];
+        ERL_NIF_TERM cell[obj->dp];
 	int i;
-	for (i = 0; i < obj->here; i++)
+	for (i = 0; i < obj->dp; i++)
 	    cell[i] = enif_make_copy(env, obj->cell[i]);
-	return enif_make_tuple_from_array(env, cell, obj->here);
+	return enif_make_tuple_from_array(env, cell, obj->dp);
     }
 }
 
+ERL_NIF_TERM here_trim(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[])
+{
+    here_object_t* obj;
 
+    if (!enif_get_resource(env, argv[0], here_res, (void**)&obj))
+	return enif_make_badarg(env);
+    if (obj->dp == 0)
+	h_clear(obj, 1);
+    else {
+	if (h_realloc(obj, obj->dp) < 0)
+	    return enif_make_badarg(env);
+    }
+    return ATOM(ok);
+}
 
 static int here_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
@@ -267,7 +299,7 @@ static int here_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     LOAD_ATOM(ok);    
 
     here_res = enif_open_resource_type(env, 0, "here",
-				       (ErlNifResourceDtor*) here_dtor,
+				       (ErlNifResourceDtor*) h_dtor,
 				       ERL_NIF_RT_CREATE,
 				       &tried);
     *priv_data = 0;
