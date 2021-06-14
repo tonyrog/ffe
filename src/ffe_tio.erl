@@ -19,14 +19,14 @@
 output(?TERMINAL_OUTPUT, Cs) ->
     ffe_tty:output(ffe:tty(), Cs);
 output(?STANDARD_OUTPUT, Cs) ->
-    erlang:display_string(lists:flatten(Cs));
+    erlang:display_string(flat_string(Cs));
 output(Fd, Cs) when is_integer(Fd), Fd > 2 ->
     file:write(ffe:get_fd(Fd), Cs).
 
 output_sync(?TERMINAL_OUTPUT, Cs) ->
     ffe_tty:output_sync(ffe:tty(), Cs);
 output_sync(?STANDARD_OUTPUT, Cs) ->
-    erlang:display_string(lists:flatten(Cs));
+    erlang:display_string(flat_string(Cs));
 output_sync(Fd, Cs) when is_integer(Fd), Fd > 2 ->
     file:write(ffe:get_fd(Fd), Cs).
 
@@ -89,3 +89,5 @@ strip_nl(Line) when is_binary(Line) ->
 strip_nl(Line) when is_list(Line) ->
     strip_nl(list_to_binary(Line)).
 
+flat_string(IoList) ->
+    binary_to_list(iolist_to_binary(IoList)).

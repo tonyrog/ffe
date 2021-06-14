@@ -116,17 +116,18 @@ compile(Filename,Opt) ->
 	[] -> 
 	    save(Filename,Opt);
 	Stack ->
-	    Msg = io_lib:format("warning: stack element after compilation: ~p",
-				[Stack]),
-	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]),
+	    Msg = ["warning: stack element after compilation: ",
+		   format_value(Stack), ?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg),
 	    save(Filename,Opt)
     catch
 	throw:{Code,Reason} ->
-	    Msg = io_lib:format("error: ~w reason: ~p",[Code,Reason]),
-	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]);
+	    Msg = ["error: ", format_value(Code), " ",
+		   "reason: ", format_value(Reason), ?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg);
 	?EXCEPTION(error,Error,_StackTrace) ->
-	    Msg = io_lib:format("error: internal error ~p", [Error]),
-	    ffe_tio:output(?STANDARD_OUTPUT, [Msg,?CRNL]),
+	    Msg = ["error: internal error ", format_value(Error), ?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg),
 	    dump_stacktrace(?GET_STACK(_StackTrace))
     after
 	file:close(Fd)
@@ -259,37 +260,6 @@ save_word(Fd, _Current, _Unthread, W) -> %% literals etc
     emit_string(Fd, ",\n  "),
     emit_value(Fd, W).
 
-format_mfa(M,F,A) when is_atom(M), is_atom(F), is_integer(A) ->
-    [format_atom(M),":",format_atom(F),"/",format_int(A)];
-format_mfa(M,F,A) when is_atom(M), is_atom(F), is_list(A) ->
-    %% FIXME: format arguments
-    [format_atom(M),":",format_atom(F),"/",format_int(length(A))].
-
-format_int(X) ->
-    integer_to_list(X).
-
-format_atom(A) when is_atom(A) ->
-    Cs = atom_to_list(A),
-    case need_quote(Cs) of
-	true -> [$'] ++ Cs ++ [$'];
-	false -> Cs
-    end.
-
-need_quote([C|Cs]) ->
-    if C >= $a, C =< $z -> need_quote_(Cs);
-       true -> true
-    end.
-    
-need_quote_([C|Cs]) ->
-    if C >= $0, C =< $9 -> need_quote_(Cs);
-       C >= $a, C =< $z -> need_quote_(Cs);
-       C >= $A, C =< $Z -> need_quote_(Cs);
-       C =:= $@ -> need_quote_(Cs);
-       C =:= $_ -> need_quote_(Cs);
-       true -> true
-    end;
-need_quote_([]) ->
-    false.
 
 %% "save" the dictionary
 save_dict_words(Fd, Module, WordsName, Dict) when is_atom(Module) ->
@@ -375,6 +345,7 @@ show_word_(Fd, _Unthread, W) ->
     emit_value(Fd, W).
 
 init() ->
+    %% here:init0(),
     Args = [list_to_binary(Arg) || Arg <- init:get_plain_arguments()],
     Argv = list_to_tuple(Args),
     try ffe_tty:open() of
@@ -741,10 +712,10 @@ dump_stacktrace([{ffe,Word,0,_}|Stack],Depth) ->
     dump_stacktrace(Stack, Depth-1);
 dump_stacktrace([{Mod,Fun,Arity,Location}|Stack],Depth) ->
     Info =
-	case proplists:get_value(file, Location, undefined) of
+	case get_prop(file, Location, undefined) of
 	    undefined -> "";
 	    File ->
-		Line = proplists:get_value(line, Location, 0),
+		Line = get_prop(line, Location, 0),
 		LineInfo = integer_to_list(Line),
 		[File,":",LineInfo," "]
 	end,
@@ -754,6 +725,16 @@ dump_stacktrace([{Mod,Fun,Arity,Location}|Stack],Depth) ->
 dump_stacktrace([],_Depth) ->
     ok.
 
+get_prop(Tag, List) ->
+    get_prop(Tag, List, undefined).
+
+get_prop(Tag, [{Tag,Value}|_Vs], _Default) ->
+    Value;
+get_prop(Tag, [_|Vs], Default) ->
+    get_prop(Tag, Vs, Default);
+get_prop(_Tag, [], Default) ->
+    Default.
+    
 %%
 %% Find a word:
 %% return: 
@@ -1230,7 +1211,6 @@ internal_words() ->
 
 ?XT("(next)", next).
 next(SP,RP,_IP0=?WPTR(IP,Code),_WP) ->
-    %% io:format("next: ip=~w, wp=~w\r\n", [_IP0,_WP]),
     Xt = element(IP,Code),     %% code parameter 
     next1(SP,RP,?WPTR(IP+1,Code),Xt).
 
@@ -1242,7 +1222,6 @@ next1(SP,RP,IP,Xt) ->
 
 ?XT("(docol)", docol).
 docol(SP,RP,IP,WP) ->
-    %%io:format("docol: ip=~w, wp=~w\r\n", [IP,WP]),
     next(SP,[IP|RP],WP,WP).
 
 ?XT("(semis)", semis).
@@ -1266,7 +1245,7 @@ semis(SP,[IP|RP],_IP,WP) ->
 exec_ret() ->
     ?CREATE_WORD(<<"(ret)">>,fun ?MODULE:exec_ret/4,fun ?MODULE:ret/0).
 exec_ret(_SP,_RP,_IP,_WP) ->
-    erlang:display("INTERNAL ERROR\n"),
+    erlang:display_string("INTERNAL ERROR\n"),
     throw({?QUIT, quit}).
 
 exec(Xt, SP) ->
@@ -1283,23 +1262,24 @@ exec(Xt, SP) ->
 	throw:{?ABORTQ=_Code,_Reason} ->
 	    quit0();
 	throw:{?ERR_UNDEF=Code,Reason} ->
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
+	    Msg = [format_value(Code)," : ", format_value(Reason),?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg),
 	    quit0();
 	throw:{Code,Reason} ->
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~w : ~p", [Code,Reason])),
+	    Msg = [format_value(Code)," : ", format_value(Reason),?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg),
 	    quit0();
 	?EXCEPTION(error,{case_clause,SP0},_StackTrace) when is_list(SP0) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    ffe_tio:output(?STANDARD_OUTPUT, ["Stack empty",?CRNL]),
 	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0();
 	?EXCEPTION(error,function_clause,_StackTrace) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Stack empty\r\n"),
+	    ffe_tio:output(?STANDARD_OUTPUT, ["Stack empty",?CRNL]),
 	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0();
 	?EXCEPTION(error,Reason,_StackTrace) ->
-	    ffe_tio:output(?STANDARD_OUTPUT, "Internal error "),
-	    ffe_tio:output(?STANDARD_OUTPUT, io_lib:format("~p", [Reason])),
-	    ffe_tio:output(?STANDARD_OUTPUT, [?CRNL]),
+	    Msg = ["Internal error ", format_value(Reason), ?CRNL],
+	    ffe_tio:output(?STANDARD_OUTPUT, Msg),
 	    dump_stacktrace(?GET_STACK(_StackTrace)),
 	    quit0()
     end.
@@ -1856,17 +1836,14 @@ dodoes(SP,RP,IP,WP=?WPTR(Wi,W)) ->
 
 ?XT("(docon)", docon).
 docon(SP,RP,IP,WP=?WPTR(W,Word)) ->
-    %%io:format("docon: ip=~w, wp=~w\r\n", [IP,WP]),
     next([element(W,Word)|SP],RP,IP,WP).
 
 ?XT("(dousr)", dousr).
 dousr(SP,RP,IP,WP0=?WPTR(W,WP)) ->
-    %%io:format("dousr: ip=~w, wp=~w\r\n", [IP,WP]),
     next([{user,element(W,WP)}|SP],RP,IP,WP0).
 
 ?XT("(dovar)", dovar).
 dovar(SP,RP,IP,WP=?WPTR(W,Word)) ->
-    %%io:format("dovar: ip=~w, wp=~w\r\n", [IP,WP]),
     next([element(W,Word)|SP],RP,IP,WP).
 
 ?XT("(doval)", doval).
@@ -2019,18 +1996,15 @@ emit_value(Fd, Value) ->
     if is_integer(Value) ->
 	    emit_string(Fd,integer_to_list(Value, get_base()));
        is_float(Value) ->
-	    emit_string(Fd,io_lib_format:fwrite_g(Value));
+	    emit_string(Fd,format_float(Value));
        is_binary(Value) ->
 	    emit_strings(Fd,["\"",Value,"\""]);
        is_pid(Value) ->
 	    emit_string(Fd,pid_to_list(Value));
        true ->
-	    %% hmm recursivly display integers in base()!
-	    %% FIXME: remove all use of io_lib and io
-	    emit_string(Fd,lists:flatten(io_lib:format("~p",[Value])))
+	    emit_string(Fd,lists:flatten(format_value(Value)))
     end.    
 
-    
 emit_char(Char) ->
     emit_char(altout(), Char).
 
@@ -2106,6 +2080,78 @@ collect_line([C|Cs], N, Acc) ->
     collect_line(Cs, N+1, [C|Acc]);
 collect_line([], N, Acc) ->
     {false, N, lists:reverse(Acc), []}.
+
+
+format_mfa(M,F,A) when is_atom(M), is_atom(F), is_integer(A) ->
+    [format_atom(M),":",format_atom(F),"/",format_int(A)];
+format_mfa(M,F,A) when is_atom(M), is_atom(F), is_list(A) ->
+    %% FIXME: format arguments
+    [format_atom(M),":",format_atom(F),"/",format_int(length(A))].
+
+format_fn(M,I,U) when is_atom(M), is_integer(I), is_integer(U) ->
+    ["#Fun<",format_atom(M),".",format_int(I),".",format_int(U)].
+
+format_int(X) ->
+    integer_to_list(X).
+
+format_atom(A) when is_atom(A) ->
+    Cs = atom_to_list(A),
+    case need_quote(Cs) of
+	true -> [$'] ++ Cs ++ [$'];
+	false -> Cs
+    end.
+
+need_quote([C|Cs]) ->
+    if C >= $a, C =< $z -> need_quote_(Cs);
+       true -> true
+    end;
+need_quote([]) ->
+    false.
+
+    
+need_quote_([C|Cs]) ->
+    if C >= $0, C =< $9 -> need_quote_(Cs);
+       C >= $a, C =< $z -> need_quote_(Cs);
+       C >= $A, C =< $Z -> need_quote_(Cs);
+       C =:= $@ -> need_quote_(Cs);
+       C =:= $_ -> need_quote_(Cs);
+       true -> true
+    end;
+need_quote_([]) ->
+    false.
+
+%% format value X as iolist (fixme quote)
+format_value(X) when is_atom(X) -> format_atom(X);
+format_value(X) when is_integer(X) -> format_int(X);
+format_value(X) when is_float(X) -> format_float(X);
+format_value(X) when is_function(X) ->
+    Info = erlang:fun_info(X),
+    case get_prop(type,Info) of
+	external ->
+	    format_mfa(get_prop(module,Info),
+		       get_prop(name,Info),
+		       get_prop(arity,Info));
+	local ->
+	    format_fn(get_prop(module,Info),
+		      get_prop(index,Info),
+		      get_prop(uniq,Info))
+    end;
+format_value(X) when is_binary(X) -> ["\"",X,"\""];
+format_value(X) when is_tuple(X) ->
+    [${,format_elements(tuple_to_list(X),","),$}];
+format_value(X) when is_list(X) ->
+    [$[,format_elements(X,","),$]].
+
+format_elements([],_Sep) -> "";
+format_elements([X],_Sep) -> format_value(X);
+format_elements([X|Xs],Sep) when is_list(Xs) ->
+    [format_value(X),Sep | format_elements(Xs,Sep)];
+format_elements([X|Y],_Sep) ->
+    [format_value(X),$|,format_value(Y)].
+
+format_float(X) ->
+    floating:format(X).
+
 
 -include("core.i").
 -include("core_ext.i").

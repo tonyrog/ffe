@@ -16,9 +16,20 @@ The words in interactive mode are added into a special module.
 
     : sqr dup * ;
 
+Run like this
+
+	$ ./priv/ffe.sh
+	 ok 
+	: sqr dup * ; ok
+	12 sqr . 144 ok
+	
+Or
+
+	echo ": sqr dup * ; 12 sqr ." | ./priv/ffe.sh
+	
 In a module:
 
-    module foo
+    \ module foo
 
     \ ( x -- (x*x) )
     : sqr dup * ;

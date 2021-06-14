@@ -17,6 +17,9 @@ all: ../priv/$(APP)_nif.so
 ../priv/$(APP)_nif.so: $(OBJS)
 	$(CC) $(LDFLAGS) $(OBJS) $(LIBS) -o ../priv/$(APP)_nif.so
 
+clean:
+	rm -f $(OBJS) ../priv/$(APP)_nif.so
+
 %.o:	%.c
 	$(CC) $(CFLAGS) -c -fPIC $<
 

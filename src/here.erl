@@ -8,6 +8,7 @@
 -module(here).
 
 -on_load(init/0).
+%%-export([init0/0]).
 -export([new/0, new/1]).
 -export([allot/2]).
 -export([size/1]).
@@ -23,8 +24,14 @@
 	erlang:nif_error({nif_not_loaded,module,?MODULE,line,?LINE})).
 
 init() ->
+    init0().
+
+init0() ->
     Nif = filename:join(code:priv_dir(ffe), "here_nif"),
-    erlang:load_nif(Nif, 0).
+    %% Nif = "/home/tony/erlang/ffe/priv/here_nif",
+    R = erlang:load_nif(Nif, 0),
+    %% erlang:display({load_nif,Nif,R}),
+    R.
 
 new() -> ?nif_stub().
 new(_Size) ->  ?nif_stub().
