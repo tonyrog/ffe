@@ -5,20 +5,23 @@ OS=$(shell uname -s)
 CFLAGS=-MMD -MP -MF .$<.d -I$(ERL_TOP)/usr/include
 #@END-C_SRC-DEFAULT-RULES@
 
-APP=here
+APP=
 CFLAGS+=-std=c99 -Wall -O3
 LDFLAGS+=-shared
 
-OBJS = here_nif.o
+OBJS = 
 LIBS = 
 
-all: ../priv/$(APP)_nif.so
+all: ../priv/here_nif.so ../priv/tty_drv.so
 
-../priv/$(APP)_nif.so: $(OBJS)
-	$(CC) $(LDFLAGS) $(OBJS) $(LIBS) -o ../priv/$(APP)_nif.so
+../priv/here_nif.so: here_nif.o
+	$(CC) $(LDFLAGS) here_nif.o $(LIBS) -o ../priv/here_nif.so
+
+../priv/tty_drv.so: tty_drv.o
+	$(CC) $(LDFLAGS) tty_drv.o -o ../priv/tty_drv.so
 
 clean:
-	rm -f $(OBJS) ../priv/$(APP)_nif.so
+	rm -f $(OBJS) ../priv/here_nif.so ../priv/tty_drv.so
 
 %.o:	%.c
 	$(CC) $(CFLAGS) -c -fPIC $<

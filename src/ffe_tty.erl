@@ -4,10 +4,14 @@
 %%%    Handle tty io
 %%% @end
 %%% Created : 22 Mar 2021 by Tony Rogvall <tony@rogvall.se>
+%%%-------------------------------------------------------------------
 
 -module(ffe_tty).
 
+-on_load(load/0).
+
 -export([open/0]).
+-export([load/0]).
 -export([input/1]).
 -export([input_ready/1]).
 -export([output/2]).
@@ -45,10 +49,16 @@
 -define(FFE_KILL_BUFFER, ffe_kill_buffer).
 -define(FFE_HISTORY, ffe_history).
 
+load() ->
+    Dir = code:priv_dir(ffe),
+    erl_ddll:load_driver(Dir, "tty_drv").
+
+
 %% FIXME: how do we steel tty_sl without fuzz?
 open() ->
     put(?FFE_TTY_INPUT, []),
-    open_port({spawn,'tty_sl -c -e'}, [eof]).
+    load(),
+    open_port({spawn_driver,"tty_drv -c -e"}, [eof]).
 
 input(Port) ->
     case get(?FFE_TTY_INPUT) of
